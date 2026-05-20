@@ -1043,6 +1043,10 @@ void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
   assert(pipe_reg);
 
   m_warp[warp_id]->ibuffer_free();
+  if (next_inst->m_reuse_mask) {
+    printf("reuse_mask=0x%04x warp_id=%d pc=0x%llx\n",
+           next_inst->m_reuse_mask, warp_id, next_inst->pc);
+  }
   assert(next_inst->valid());
   **pipe_reg = *next_inst;  // static instruction information
   (*pipe_reg)->issue(

@@ -1074,6 +1074,7 @@ class warp_inst_t : public inst_t {
     m_is_depbar = false;
 
     m_depbar_group_no = 0;
+    m_reuse_mask = 0;
   }
   warp_inst_t(const core_config *config) {
     m_uid = 0;
@@ -1095,6 +1096,7 @@ class warp_inst_t : public inst_t {
     m_is_depbar = false;
 
     m_depbar_group_no = 0;
+    m_reuse_mask = 0;
   }
   virtual ~warp_inst_t() {}
 
@@ -1287,6 +1289,7 @@ class warp_inst_t : public inst_t {
   bool m_is_depbar;
 
   unsigned int m_depbar_group_no;
+  unsigned m_reuse_mask;  // bitmask: bit s = 1 means src reg s has .reuse (RFC hint)
 };
 
 void move_warp(warp_inst_t *&dst, warp_inst_t *&src);
