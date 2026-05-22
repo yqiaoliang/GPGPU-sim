@@ -45,6 +45,7 @@
 #include <set>
 #include <utility>
 #include <vector>
+#include <unordered_set> 
 
 // #include "../cuda-sim/ptx.tab.h"
 
@@ -637,6 +638,67 @@ class swl_scheduler : public scheduler_unit {
   unsigned m_num_warps_to_limit;
 };
 
+
+
+class register_file_cache_t{
+public:
+  register_file_cache_t(unsigned scheduler_id, unsigned bank_num, unsigned slot_num);
+  ~register_file_cache_t();
+  void cycle();
+  bool is_src_operands_in_cache(unsigned warp_idx, unsigned reg_idx, unsigned slot_idx, bool is_crossbar = false);
+  void compute_inst_src_operands_cycle(warp_inst_t *inst);
+  void set_reuse(warp_inst_t *inst);
+  void issue_inst_to_next_stage();
+  bool is_busy() const {return m_is_busy;}
+  void set_busy(bool status) {m_is_busy = status;}
+  void init_rfc_slots(unsigned slot_idx);
+
+
+
+  struct register_file_cache_slot_t{
+    unsigned warp_idx;
+    unsigned reg_idx;
+    bool data_valid;
+    bool is_reuse;
+    bool is_this_slot_enabled;
+  };
+
+
+public:
+  bool m_is_busy;
+  // bool m_new_issue;
+  unsigned m_bank_num;
+  unsigned m_scheduler_id;
+  register_set * m_rfc_set;
+  register_set * m_out_port_set;
+  std::vector<register_file_cache_slot_t> m_rfc_slots;
+  unsigned cur_inst_src_operands_remaining_cycle;
+  unsigned this_rfc_use_reuse_time;
+};
+
+
+
+class operand_fetch_t{
+public:
+  operand_fetch_t(){};
+  void init (unsigned scheduler_num, unsigned bank_num, unsigned slot_num);
+  void cycle();
+  void add_ports(std::vector<register_set *> in_ports, std::vector<register_set *> out_ports);
+
+
+  struct in_out_port_t{
+    std::vector<register_set *> in_ports;
+    std::vector<register_set *> out_ports;
+  };
+
+private:
+  in_out_port_t m_ports;
+  unsigned m_scheduler_num;
+  std::vector<unsigned> m_last_issued_ports;
+  std::vector<register_file_cache_t *> m_rfc_caches;
+};
+
+
 class opndcoll_rfu_t {  // operand collector based register file unit
  public:
   // constructors
@@ -661,6 +723,8 @@ class opndcoll_rfu_t {  // operand collector based register file unit
     for (unsigned p = 0; p < m_in_ports.size(); p++) allocate_cu(p);
     process_banks();
   }
+
+  void reset_banks() { process_banks(); }  // for RFC replacement: reset bank write allocations
 
   void dump(FILE *fp) const {
     fprintf(fp, "\n");
@@ -2533,6 +2597,7 @@ class shader_core_ctx : public core_t {
   std::vector<register_set> m_pipeline_reg;
   Scoreboard *m_scoreboard;
   opndcoll_rfu_t m_operand_collector;
+  operand_fetch_t m_operand_fetch;
   int m_active_warps;
   std::vector<register_set *> m_specilized_dispatch_reg;
 
