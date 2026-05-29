@@ -642,7 +642,7 @@ class swl_scheduler : public scheduler_unit {
 
 class register_file_cache_t{
 public:
-  register_file_cache_t(unsigned scheduler_id, unsigned bank_num, unsigned slot_num);
+  register_file_cache_t(unsigned scheduler_id, unsigned bank_num, unsigned slot_num, bool is_compiler_ctrl_reuse);
   ~register_file_cache_t();
   void cycle();
   bool is_src_operands_in_cache(unsigned warp_idx, unsigned reg_idx, unsigned slot_idx, bool is_crossbar = false);
@@ -674,6 +674,8 @@ public:
   std::vector<register_file_cache_slot_t> m_rfc_slots;
   unsigned cur_inst_src_operands_remaining_cycle;
   unsigned this_rfc_use_reuse_time;
+
+  bool is_compiler_ctrl_reuse;
 };
 
 
@@ -681,8 +683,10 @@ public:
 class operand_fetch_t{
 public:
   operand_fetch_t(){};
-  void init (unsigned scheduler_num, unsigned bank_num, unsigned slot_num);
+  void init (unsigned scheduler_num, unsigned bank_num, unsigned rfc_num, unsigned slot_num, bool is_compiler_ctrl_reuse);
   void cycle();
+  // unsigned choose_which_rfc_to_issue(unsigned scheduler_id, warp_inst_t *inst);
+  unsigned rfc_reuse_time(unsigned rfc_idx, warp_inst_t *inst);
   void add_ports(std::vector<register_set *> in_ports, std::vector<register_set *> out_ports);
 
 
@@ -694,8 +698,11 @@ public:
 private:
   in_out_port_t m_ports;
   unsigned m_scheduler_num;
+  unsigned m_rfc_num;
   std::vector<unsigned> m_last_issued_ports;
   std::vector<register_file_cache_t *> m_rfc_caches;
+
+  bool is_compiler_ctrl_reuse;
 };
 
 
@@ -1752,6 +1759,11 @@ class shader_core_config : public core_config {
   bool gpgpu_local_mem_map;
   bool gpgpu_ignore_resources_limitation;
   bool sub_core_model;
+
+  // custom RFC config
+  bool gpgpu_is_use_rfc;
+  bool gpgpu_is_compiler_ctrl_reuse;
+  int gpgpu_rfc_or_oc_per_scheduler_num;
 
   unsigned max_sp_latency;
   unsigned max_int_latency;

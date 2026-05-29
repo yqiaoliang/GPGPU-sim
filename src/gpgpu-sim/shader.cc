@@ -503,7 +503,8 @@ shader_core_ctx::shader_core_ctx(class gpgpu_sim *gpu,
   m_occupied_ctas = 0;
   m_occupied_hwtid.reset();
   m_occupied_cta_to_hwtid.clear();
-  m_operand_fetch.init(4, 2, 3);
+  unsigned rfc_num = config->gpgpu_num_sched_per_core * config->gpgpu_rfc_or_oc_per_scheduler_num;
+  m_operand_fetch.init(config->gpgpu_num_sched_per_core, config->gpgpu_num_reg_banks, rfc_num, 3, config->gpgpu_is_compiler_ctrl_reuse);
 }
 
 void shader_core_ctx::reinit(unsigned start_thread, unsigned end_thread,
@@ -1716,12 +1717,19 @@ void swl_scheduler::order_warps() {
   }
 }
 
-void operand_fetch_t::init(unsigned scheduler_num, unsigned bank_num, unsigned slot_num) {
+void operand_fetch_t::init(unsigned scheduler_num, unsigned bank_num, unsigned rfc_num, unsigned slot_num, bool is_compiler_ctrl_reuse) {
   m_scheduler_num = scheduler_num;
+  m_rfc_num = rfc_num;
+  m_is_compiler_ctrl_reuse = is_compiler_ctrl_reuse;
 
-  for (unsigned i = 0; i < scheduler_num; i++){
+  if (m_rfc_num % m_scheduler_num != 0) {
+    fprintf(stderr, "Error: m_rfc_num should be a multiple of m_scheduler_num (m_rfc_num = %u, m_scheduler_num = %u)\n", m_rfc_num, m_scheduler_num);
+    abort();
+  }
+
+  for (unsigned i = 0; i < m_rfc_num; i++){
     m_last_issued_ports.push_back(0);
-    m_rfc_caches.push_back(new register_file_cache_t(i, bank_num, slot_num));
+    m_rfc_caches.push_back(new register_file_cache_t(i % m_scheduler_num, bank_num, slot_num));
   }
 }
 
@@ -1730,30 +1738,80 @@ void operand_fetch_t::add_ports(std::vector<register_set *> in_ports, std::vecto
   m_ports.out_ports = out_ports;
 }
 
+// void operand_fetch_t::cycle() {
+//   for (unsigned i = 0; i < m_scheduler_num; i++){
+//     for (unsigned j = 0; j < m_rfc_num / m_scheduler_num; j++){
+//       unsigned rfc_id = m_scheduler_num * j + i;
+//       if (m_rfc_caches[rfc_id]->is_busy()) m_rfc_caches[rfc_id]->cycle();
+//       else {
+//         for(unsigned k = 0; k < m_ports.in_ports.size(); k++){
+//           unsigned cur_read_ports = (k + m_last_issued_ports[i]) % m_ports.in_ports.size();
+//           if (m_ports.in_ports[cur_read_ports]->has_ready(true, i)){
+//             warp_inst_t ** cur_scheduler_rfc_port = m_rfc_caches[rfc_id]->m_rfc_set->get_free(); // only one register set
+//             m_ports.in_ports[cur_read_ports]->move_out_to(true, i, *cur_scheduler_rfc_port);
+
+//             m_rfc_caches[rfc_id]->set_busy(true);
+//             m_rfc_caches[rfc_id]->compute_inst_src_operands_cycle(*cur_scheduler_rfc_port);
+//             m_rfc_caches[rfc_id]->m_out_port_set = m_ports.out_ports[cur_read_ports];
+
+//             m_last_issued_ports[i] = cur_read_ports;
+//             break;
+//           }
+//         }
+//       }
+//     }
+//   }
+// }
+
 void operand_fetch_t::cycle() {
   for (unsigned i = 0; i < m_scheduler_num; i++){
-    if (m_rfc_caches[i]->is_busy()) m_rfc_caches[i]->cycle();
-    else {
-      for(unsigned j = 0; j < m_ports.in_ports.size(); j++){
-        unsigned cur_read_ports = (j + m_last_issued_ports[i]) % m_ports.in_ports.size();
-        if (m_ports.in_ports[cur_read_ports]->has_ready(true, i)){
-          warp_inst_t ** cur_scheduler_rfc_port = m_rfc_caches[i]->m_rfc_set->get_free(); // only one register set
-          m_ports.in_ports[cur_read_ports]->move_out_to(true, i, *cur_scheduler_rfc_port);
+    for (unsigned j = 0; j < m_rfc_num / m_scheduler_num; j++){
+      unsigned rfc_id = m_scheduler_num * j + i;
+      if (m_rfc_caches[rfc_id]->is_busy()) m_rfc_caches[rfc_id]->cycle();
+      else {
+        unsigned rr_port = -1; // round robin port
+        unsigned choosen_port = -1;
+        unsigned max_use_reuse_time = 0;
+        for(unsigned k = 0; k < m_ports.in_ports.size(); k++){
+          unsigned cur_rr_port = (k + m_last_issued_ports[i]) % m_ports.in_ports.size();
+          if (m_ports.in_ports[cur_rr_port]->has_ready(true, i) and rr_port == -1) rr_port = cur_rr_port;
 
-          m_rfc_caches[i]->set_busy(true);
-          m_rfc_caches[i]->compute_inst_src_operands_cycle(*cur_scheduler_rfc_port);
-          m_rfc_caches[i]->m_out_port_set = m_ports.out_ports[cur_read_ports];
-
-          m_last_issued_ports[i] = cur_read_ports;
-          break;
+          if (m_ports.in_ports[k]->has_ready(true, i)){
+            unsigned cur_port_reuse_time = rfc_reuse_time(rfc_id, m_ports.in_ports[k]->get_ready_inst(true, i));
+            if (cur_port_reuse_time > max_use_reuse_time){
+              max_use_reuse_time = cur_port_reuse_time;
+              choosen_port = k;
+            }
+          }
         }
+
+        if (rr_port == -1 and choosen_port == -1) continue;
+        if (max_use_reuse_time > 0) choosen_port = choosen_port;
+        else choosen_port = rr_port;
+
+        warp_inst_t ** cur_scheduler_rfc_port = m_rfc_caches[rfc_id]->m_rfc_set->get_free(); // only one register set
+        m_ports.in_ports[choosen_port]->move_out_to(true, i, *cur_scheduler_rfc_port);
+
+        m_rfc_caches[rfc_id]->set_busy(true);
+        m_rfc_caches[rfc_id]->compute_inst_src_operands_cycle(*cur_scheduler_rfc_port);
+        m_rfc_caches[rfc_id]->m_out_port_set = m_ports.out_ports[choosen_port];
       }
     }
   }
 }
 
+unsigned operand_fetch_t::rfc_reuse_time(unsigned rfc_idx, warp_inst_t *inst) {
+  unsigned reuse_time = 0;
+  for (unsigned i = 0; i < m_rfc_caches[rfc_idx]->m_rfc_slots.size(); i++){
+    if (m_rfc_caches[rfc_idx]->m_rfc_slots[i].is_reuse and m_rfc_caches[rfc_idx]->m_rfc_slots[i].warp_idx == inst->warp_id() and m_rfc_caches[rfc_idx]->m_rfc_slots[i].reg_idx == inst->arch_reg.src[i]){
+      reuse_time += 1;
+    }
+  }
+  return reuse_time;
+}
 
-register_file_cache_t::register_file_cache_t(unsigned scheduler_id, unsigned bank_num, unsigned slot_num) {
+
+register_file_cache_t::register_file_cache_t(unsigned scheduler_id, unsigned bank_num, unsigned slot_num, bool is_compiler_ctrl_reuse) {
   m_is_busy = false;
   // m_new_issue = false;
   m_bank_num = bank_num;
@@ -1763,6 +1821,7 @@ register_file_cache_t::register_file_cache_t(unsigned scheduler_id, unsigned ban
   for (unsigned i = 0; i < slot_num; i++) init_rfc_slots(i);
   cur_inst_src_operands_remaining_cycle = 0;
   this_rfc_use_reuse_time = 0;
+  m_is_compiler_ctrl_reuse = is_compiler_ctrl_reuse;
 }
 
 void register_file_cache_t::init_rfc_slots(unsigned slot_idx) {
@@ -1848,8 +1907,9 @@ void register_file_cache_t::compute_inst_src_operands_cycle(warp_inst_t *inst) {
   }
 
   cur_inst_src_operands_remaining_cycle = max_bank_read_num;
-  printf("The warp %d instruction with pc = %d needs to read source operands from register file for %d cycles \n", 
-        inst->warp_id(), inst->pc, cur_inst_src_operands_remaining_cycle);
+  // cur_inst_src_operands_remaining_cycle = 0;
+  // printf("The warp %d in scheduler %d instruction with pc = %d needs to read source operands from register file for %d cycles \n", 
+  //       inst->warp_id(), m_scheduler_id, inst->pc, cur_inst_src_operands_remaining_cycle);
   
 }
 
@@ -1883,7 +1943,7 @@ bool register_file_cache_t::is_src_operands_in_cache(unsigned warp_idx, unsigned
 void register_file_cache_t::set_reuse(warp_inst_t *inst) {
   unsigned reuse_mask = inst->m_reuse_mask;
   for (int i = 0; i < m_rfc_slots.size(); i++){
-    if (reuse_mask & (1 << i)){
+    if (reuse_mask & (1 << i) or !m_is_compiler_ctrl_reuse){
       m_rfc_slots[i].is_reuse = true;
     }
   }
@@ -1917,10 +1977,14 @@ void register_file_cache_t::issue_inst_to_next_stage() {
 }
 
 void shader_core_ctx::read_operands() {
-  // for (unsigned int i = 0; i < m_config->reg_file_port_throughput; ++i)
-  //   m_operand_collector.step();
-  m_operand_fetch.cycle();
-  m_operand_collector.reset_banks(); 
+  if (m_config->gpgpu_is_use_rfc) {
+    m_operand_fetch.cycle();
+    m_operand_collector.reset_banks(); 
+  }
+  else {
+    for (unsigned int i = 0; i < m_config->reg_file_port_throughput; ++i)
+    m_operand_collector.step();
+  }
 }
 
 address_type coalesced_segment(address_type addr,

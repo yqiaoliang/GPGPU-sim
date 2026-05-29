@@ -499,6 +499,16 @@ void shader_core_config::reg_options(class OptionParser *opp) {
   option_parser_register(opp, "-gpgpu_sub_core_model", OPT_BOOL,
                          &sub_core_model,
                          "Sub Core Volta/Pascal model (default = off)", "0");
+  // custom RFC config
+  option_parser_register(opp, "-gpgpu_is_use_rfc", OPT_BOOL,
+                         &gpgpu_is_use_rfc,
+                         "Enable Register File Cache (default = off)", "0");
+  option_parser_register(opp, "-gpgpu_is_compiler_ctrl_reuse", OPT_BOOL,
+                         &gpgpu_is_compiler_ctrl_reuse,
+                         "Use compiler-driven reuse control for RFC (default = off)", "0");
+  option_parser_register(opp, "-gpgpu_rfc_or_oc_per_scheduler_num", OPT_INT32,
+                         &gpgpu_rfc_or_oc_per_scheduler_num,
+                         "Number of RFC/OC units per scheduler (default = 1)", "1");
   option_parser_register(opp, "-gpgpu_enable_specialized_operand_collector",
                          OPT_BOOL, &enable_specialized_operand_collector,
                          "enable_specialized_operand_collector", "1");
@@ -1533,6 +1543,13 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
   shader_print_scheduler_stat(stdout, false);
 
   m_shader_stats->print(stdout);
+
+  // Dump per-warp and per-instruction stall lifecycle breakdown
+  printf("\n===== Warp Stall Lifecycle Breakdown =====\n");
+  for (unsigned i = 0; i < m_config.num_cluster(); i++) {
+    m_cluster[i]->dump_warp_stall_breakdown(stdout);
+  }
+
 #ifdef GPGPUSIM_POWER_MODEL
   if (m_config.g_power_simulation_enabled) {
     if (m_config.g_power_simulation_mode > 0) {
