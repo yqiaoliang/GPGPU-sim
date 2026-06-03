@@ -199,6 +199,26 @@ enum _memory_op_t { no_memory_op = 0, memory_load, memory_store };
 #if !defined(__VECTOR_TYPES_H__)
 #include "vector_types.h"
 #endif
+
+
+enum warp_inst_stage_t{
+  INST_STAGE_NONE = 0,
+  INST_STAGE_SCHEDULER,
+  INST_STAGE_OPERAND_COLLECTOR,
+  INST_STAGE_EXECUTION_PIPELINE,
+  INST_STAGE_WRITEBACK,
+  NUM_WARP_INST_STAGE
+};
+
+inline warp_inst_stage_t& operator++(warp_inst_stage_t& s) {
+  s = static_cast<warp_inst_stage_t>(s + 1);
+  return s;
+}
+inline warp_inst_stage_t operator++(warp_inst_stage_t& s, int) {
+    auto tmp = s;
+    s = static_cast<warp_inst_stage_t>(s + 1);
+    return tmp;
+}
 struct dim3comp {
   bool operator()(const dim3 &a, const dim3 &b) const {
     if (a.z < b.z)
@@ -1061,6 +1081,7 @@ const unsigned MAX_ACCESSES_PER_INSN_PER_THREAD = 8;
 
 class warp_inst_t : public inst_t {
  public:
+
   // constructors
   warp_inst_t() {
     m_uid = 0;
@@ -1075,6 +1096,12 @@ class warp_inst_t : public inst_t {
 
     m_depbar_group_no = 0;
     m_reuse_mask = 0;
+
+    m_stall_cycles.resize(NUM_WARP_INST_STAGE, 0);
+    m_remaining_cycles.resize(NUM_WARP_INST_STAGE, 0);
+
+    m_cur_stage = INST_STAGE_NONE;
+    m_cur_stage_cycles = 0;
   }
   warp_inst_t(const core_config *config) {
     m_uid = 0;
@@ -1099,6 +1126,26 @@ class warp_inst_t : public inst_t {
     m_reuse_mask = 0;
   }
   virtual ~warp_inst_t() {}
+
+
+  
+
+  #define NUM_WARP_INST_STALL NUM_WARP_INST_STAGE
+  #define NUM_WARP_INST_REMAINING NUM_WARP_INST_STAGE
+
+  std::string warp_inst_stage_name[NUM_WARP_INST_STAGE]={
+    "NONE",
+    "SCHEDULER",
+    "OPERAND_COLLECTOR",
+    "EXECUTION_PIPELINE",
+    "WRITEBACK"
+  };
+
+
+  warp_inst_stage_t m_cur_stage;
+  unsigned long long m_cur_stage_cycles;
+  std::vector<unsigned long long> m_stall_cycles;
+  std::vector<unsigned long long> m_remaining_cycles;
 
   // modifiers
   void broadcast_barrier_reduction(const active_mask_t &access_mask);

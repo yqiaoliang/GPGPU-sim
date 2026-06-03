@@ -1544,11 +1544,11 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
 
   m_shader_stats->print(stdout);
 
-  // Dump per-warp and per-instruction stall lifecycle breakdown
-  printf("\n===== Warp Stall Lifecycle Breakdown =====\n");
-  for (unsigned i = 0; i < m_config.num_cluster(); i++) {
-    m_cluster[i]->dump_warp_stall_breakdown(stdout);
-  }
+  // // Dump per-warp and per-instruction stall lifecycle breakdown
+  // printf("\n===== Warp Stall Lifecycle Breakdown =====\n");
+  // for (unsigned i = 0; i < m_config.num_cluster(); i++) {
+  //   m_cluster[i]->dump_warp_stall_breakdown(stdout);
+  // }
 
 #ifdef GPGPUSIM_POWER_MODEL
   if (m_config.g_power_simulation_enabled) {

@@ -642,7 +642,7 @@ class swl_scheduler : public scheduler_unit {
 
 class register_file_cache_t{
 public:
-  register_file_cache_t(unsigned scheduler_id, unsigned bank_num, unsigned slot_num, bool is_compiler_ctrl_reuse);
+  register_file_cache_t(unsigned scheduler_id, unsigned bank_num, unsigned slot_num, bool is_compiler_ctrl_reuse, shader_core_ctx *core);
   ~register_file_cache_t();
   void cycle();
   bool is_src_operands_in_cache(unsigned warp_idx, unsigned reg_idx, unsigned slot_idx, bool is_crossbar = false);
@@ -674,8 +674,8 @@ public:
   std::vector<register_file_cache_slot_t> m_rfc_slots;
   unsigned cur_inst_src_operands_remaining_cycle;
   unsigned this_rfc_use_reuse_time;
-
-  bool is_compiler_ctrl_reuse;
+  shader_core_ctx *m_core;
+  bool m_is_compiler_ctrl_reuse;
 };
 
 
@@ -683,7 +683,7 @@ public:
 class operand_fetch_t{
 public:
   operand_fetch_t(){};
-  void init (unsigned scheduler_num, unsigned bank_num, unsigned rfc_num, unsigned slot_num, bool is_compiler_ctrl_reuse);
+  void init (unsigned scheduler_num, unsigned bank_num, unsigned rfc_num, unsigned slot_num, bool is_compiler_ctrl_reuse, shader_core_ctx *core);
   void cycle();
   // unsigned choose_which_rfc_to_issue(unsigned scheduler_id, warp_inst_t *inst);
   unsigned rfc_reuse_time(unsigned rfc_idx, warp_inst_t *inst);
@@ -701,8 +701,8 @@ private:
   unsigned m_rfc_num;
   std::vector<unsigned> m_last_issued_ports;
   std::vector<register_file_cache_t *> m_rfc_caches;
-
-  bool is_compiler_ctrl_reuse;
+  shader_core_ctx *m_core;
+  bool m_is_compiler_ctrl_reuse;
 };
 
 

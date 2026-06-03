@@ -239,6 +239,14 @@ void warp_inst_t::clear_active(const active_mask_t &inactive) {
   m_warp_active_mask &= ~inactive;
 }
 
+// const std::string warp_inst_t::warp_inst_stage_name[NUM_WARP_INST_STAGE] = {
+//     "NONE",
+//     "SCHEDULER",
+//     "OPERAND_COLLECTOR",
+//     "EXECUTION_PIPELINE",
+//     "WRITEBACK"
+// };
+
 void warp_inst_t::set_not_active(unsigned lane_id) {
   m_warp_active_mask.reset(lane_id);
 }
