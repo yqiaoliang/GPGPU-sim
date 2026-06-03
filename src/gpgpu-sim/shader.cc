@@ -896,6 +896,12 @@ void shader_core_ctx::decode() {
     address_type pc = m_inst_fetch_buffer.m_pc;
     const warp_inst_t *pI1 = get_next_inst(m_inst_fetch_buffer.m_warp_id, pc);
     if (pI1) {
+      warp_inst_t *pW = const_cast<warp_inst_t *>(pI1);
+      unsigned long long current_cycle = m_gpu->gpu_sim_cycle;
+      pW->m_remaining_cycles[pI1->m_cur_stage] = current_cycle - pW->m_cur_stage_cycles;
+      pW->m_cur_stage_cycles = current_cycle;
+      pW->m_cur_stage++;
+
       m_warp[m_inst_fetch_buffer.m_warp_id]->ibuffer_fill(0, pI1);
       m_warp[m_inst_fetch_buffer.m_warp_id]->inc_inst_in_pipeline();
       m_stats->m_num_decoded_insn[m_sid]++;
@@ -909,6 +915,12 @@ void shader_core_ctx::decode() {
       const warp_inst_t *pI2 =
           get_next_inst(m_inst_fetch_buffer.m_warp_id, pc + pI1->isize);
       if (pI2) {
+        warp_inst_t *pW = const_cast<warp_inst_t *>(pI2);
+        unsigned long long current_cycle = m_gpu->gpu_sim_cycle;
+        pW->m_remaining_cycles[pI2->m_cur_stage] = current_cycle - pW->m_cur_stage_cycles;
+        pW->m_cur_stage_cycles = current_cycle;
+        pW->m_cur_stage++;
+
         m_warp[m_inst_fetch_buffer.m_warp_id]->ibuffer_fill(1, pI2);
         m_warp[m_inst_fetch_buffer.m_warp_id]->inc_inst_in_pipeline();
         m_stats->m_num_decoded_insn[m_sid]++;
@@ -1050,6 +1062,17 @@ void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
   //   printf("reuse_mask=0x%04x warp_id=%d pc=0x%llx\n",
   //          next_inst->m_reuse_mask, warp_id, next_inst->pc);
   // }
+
+  warp_inst_t *pW = const_cast<warp_inst_t*>(next_inst);
+
+  unsigned long long cur_inst_remaining_cycles = m_gpu->gpu_sim_cycle - pW->m_cur_stage_cycles;
+  pW->m_remaining_cycles[pW->m_cur_stage] = cur_inst_remaining_cycles;
+  pW->m_cur_stage_cycles = m_gpu->gpu_sim_cycle;
+  // printf("warp_inst_t: pc=0x%llx, cur_stage=%d, remaining_cycles=%lld\n",
+  //        pW->pc, pW->m_cur_stage, cur_inst_remaining_cycles);
+  pW->m_cur_stage = INST_STAGE_OPERAND_COLLECTOR;
+
+  
   assert(next_inst->valid());
   **pipe_reg = *next_inst;  // static instruction information
   (*pipe_reg)->issue(
@@ -1307,11 +1330,12 @@ void scheduler_unit::cycle() {
           "barrier\n",
           (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id());
 
-    const warp_inst_t *pI = warp(warp_id).ibuffer_next_inst();
+    const warp_inst_t *pI = NULL;
     while (!warp(warp_id).waiting() && !warp(warp_id).ibuffer_empty() &&
            (checked < max_issue) && (checked <= issued) &&
            (issued < max_issue)) {
       // Jin: handle cdp latency;
+      pI = warp(warp_id).ibuffer_next_inst();
       if (pI && pI->m_is_cdp && warp(warp_id).m_cdp_latency > 0) {
         assert(warp(warp_id).m_cdp_dummy);
         warp(warp_id).m_cdp_latency--;
@@ -1551,10 +1575,6 @@ void scheduler_unit::cycle() {
       
 
       record_issue_information = true;
-      // unsigned long long cur_inst_remaining_cycles = m_shader->get_gpu()->gpu_sim_cycle - pW->m_cur_stage_cycles;
-      // pW->m_remaining_cycles[pW->m_cur_stage] = cur_inst_remaining_cycles;
-      // pW->m_cur_stage_cycles = m_shader->get_gpu()->gpu_sim_cycle;
-      // pW->m_cur_stage++;
       for (std::vector<shd_warp_t *>::const_iterator supervised_iter =
                m_supervised_warps.begin();
            supervised_iter != m_supervised_warps.end(); ++supervised_iter) {
@@ -1572,7 +1592,13 @@ void scheduler_unit::cycle() {
 
       // break;
     }
-    else if (!issued) pW->m_stall_cycles[pW->m_cur_stage]++;
+    else if (!issued and pI != NULL) {
+      if (pW->m_cur_stage == INST_STAGE_SCHEDULER) pW->m_stall_cycles[pW->m_cur_stage]++;
+      else {
+        printf("inst pc=0x%llx, cur_stage=%d, not issued\n", pW->pc, pW->m_cur_stage);
+        abort();
+      }
+    }
   }
 
   // issue stall statistics:
@@ -1734,7 +1760,7 @@ void operand_fetch_t::init(unsigned scheduler_num, unsigned bank_num, unsigned r
   m_rfc_num = rfc_num;
   m_is_compiler_ctrl_reuse = is_compiler_ctrl_reuse;
   m_core = core;
-  printf("test_0\n");
+  // printf("test_0\n");
 
   if (m_rfc_num % m_scheduler_num != 0) {
     fprintf(stderr, "Error: m_rfc_num should be a multiple of m_scheduler_num (m_rfc_num = %u, m_scheduler_num = %u)\n", m_rfc_num, m_scheduler_num);
@@ -1810,7 +1836,7 @@ void operand_fetch_t::cycle() {
         m_rfc_caches[rfc_id]->compute_inst_src_operands_cycle(*cur_scheduler_rfc_port);
         m_rfc_caches[rfc_id]->m_out_port_set = m_ports.out_ports[choosen_port];
         if ((*cur_scheduler_rfc_port)->m_cur_stage != INST_STAGE_OPERAND_COLLECTOR) {
-           fprintf(stderr, "Error: the current stage of the instruction in rfc is not operand collector stage when it is issued to rfc (cur_stage = %u)\n", (*cur_scheduler_rfc_port)->m_cur_stage);
+           fprintf(stderr, "Error: the current stage of the instruction in rfc is not operand collector stage when it is issued to rfc (cur_stage = %u)\n", (*cur_scheduler_rfc_port)-> m_cur_stage);
            abort();
          }
         (*cur_scheduler_rfc_port)->m_stall_cycles[(*cur_scheduler_rfc_port)->m_cur_stage] = m_rfc_caches[rfc_id]->cur_inst_src_operands_remaining_cycle;
@@ -1993,10 +2019,10 @@ void register_file_cache_t::issue_inst_to_next_stage() {
     }
     warp_inst_t *issued_inst = *m_rfc_set->get_ready();
 
-    // unsigned long long cur_inst_remaining_cycles = m_core->get_gpu()->gpu_sim_cycle - issued_inst->m_cur_stage_cycles;
-    // issued_inst->m_remaining_cycles[issued_inst->m_cur_stage] = cur_inst_remaining_cycles;
-    // issued_inst->m_cur_stage_cycles = m_core->get_gpu()->gpu_sim_cycle;
-    // issued_inst->m_cur_stage++;
+    unsigned long long cur_inst_remaining_cycles = m_core->get_gpu()->gpu_sim_cycle - issued_inst->m_cur_stage_cycles;
+    issued_inst->m_remaining_cycles[issued_inst->m_cur_stage] = cur_inst_remaining_cycles;
+    issued_inst->m_cur_stage_cycles = m_core->get_gpu()->gpu_sim_cycle;
+    issued_inst->m_cur_stage++;
 
     m_out_port_set->move_in(true, m_scheduler_id, *m_rfc_set->get_ready());
     m_is_busy = false;
@@ -2259,23 +2285,17 @@ void shader_core_ctx::writeback() {
      * no stalling).
      */
 
-    //  if (pipe_reg->m_cur_stage != pipe_reg->m_cur_stage_t::INST_STAGE_WRITEBACK) {
-    //    fprintf(stderr, "Error: the current stage of the instruction in writeback is not writeback stage (cur_stage = %u)\n", *pipe_reg->m_cur_stage);
-    //    abort();
-    //  }
 
-    //  unsigned long long cur_cycle = m_gpu->gpu_sim_cycle;
-    //  pipe_reg->m_remaining_cycles[pipe_reg->m_cur_stage] = cur_cycle - pipe_reg->m_cur_stage_cycles;
-    //  pipe_reg->m_cur_stage_cycles = cur_cycle - pipe_reg->m_cur_stage_cycles;
-    //  pipe_reg->m_cur_stage++;
-
-
-     
-
-      for(unsigned i = 0; i < pipe_reg->m_remaining_cycles.size(); i++){
-        std::string stage_name = pipe_reg->warp_inst_stage_name[i];
-        printf("stage: %s, stall cycles: %d, remaining cycles: %d \n", stage_name.c_str(), pipe_reg->m_stall_cycles[i], pipe_reg->m_remaining_cycles[i]);
+     if (pipe_reg->m_cur_stage != INST_STAGE_WRITEBACK) {
+       fprintf(stderr, "Error: the current stage of the instruction in writeback is not writeback stage (cur_stage = %u)\n", pipe_reg->m_cur_stage);
+       abort();
      }
+
+     unsigned long long cur_cycle = m_gpu->gpu_sim_cycle;
+     pipe_reg->m_remaining_cycles[pipe_reg->m_cur_stage] = cur_cycle - pipe_reg->m_cur_stage_cycles;
+     pipe_reg->m_cur_stage_cycles = cur_cycle - pipe_reg->m_cur_stage_cycles;
+     pipe_reg->m_cur_stage++;
+     pipe_reg->print_time_info();
 
 
 
@@ -2879,10 +2899,10 @@ void pipelined_simd_unit::cycle() {
           inst->get_uid(), inst->warp_id(), inst->m_cur_stage);
       assert(0);
     }
-    // unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-    // inst->m_remaining_cycles[inst->m_cur_stage] = cur_cycle - inst->m_cur_stage_cycles;
-    // inst->m_cur_stage++;
-    // inst->m_cur_stage_cycles = cur_cycle;
+    unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
+    inst->m_remaining_cycles[inst->m_cur_stage] = cur_cycle - inst->m_cur_stage_cycles;
+    inst->m_cur_stage++;
+    inst->m_cur_stage_cycles = cur_cycle;
     
     m_result_port->move_in(m_pipeline_reg[0]);
     assert(active_insts_in_pipeline > 0);
@@ -3073,10 +3093,10 @@ void ldst_unit::writeback() {
               m_next_wb.get_uid(), m_next_wb.warp_id(), m_next_wb.m_cur_stage);
           assert(0);
         }
-        // unsigned cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-        // m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
-        // m_next_wb.m_cur_stage_cycles = cur_cycle;
-        // m_next_wb.m_cur_stage++;
+        unsigned cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
+        m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
+        m_next_wb.m_cur_stage_cycles = cur_cycle;
+        m_next_wb.m_cur_stage++;
 
         if (m_next_wb.m_is_ldgsts) {
           m_core->unset_depbar(m_next_wb);
@@ -3098,10 +3118,11 @@ void ldst_unit::writeback() {
         if (!m_pipeline_reg[0]->empty()) {
           m_next_wb = *m_pipeline_reg[0];
 
-          // unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-          // m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
-          // m_next_wb.m_cur_stage_cycles = cur_cycle;
-          // m_next_wb.m_cur_stage++;
+          unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
+          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
+          m_next_wb.m_cur_stage_cycles = cur_cycle;
+          m_next_wb.m_cur_stage++;
+          m_next_wb.print_time_info();
 
           if (m_next_wb.isatomic()) {
             m_next_wb.do_atomic();
@@ -3118,10 +3139,11 @@ void ldst_unit::writeback() {
           mem_fetch *mf = m_L1T->next_access();
           m_next_wb = mf->get_inst();
 
-          // unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-          // m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
-          // m_next_wb.m_cur_stage_cycles = cur_cycle;
-          // m_next_wb.m_cur_stage++;
+          unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
+          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
+          m_next_wb.m_cur_stage_cycles = cur_cycle;
+          m_next_wb.m_cur_stage++;
+          m_next_wb.print_time_info();
 
           delete mf;
           serviced_client = next_client;
@@ -3132,10 +3154,11 @@ void ldst_unit::writeback() {
           mem_fetch *mf = m_L1C->next_access();
           m_next_wb = mf->get_inst();
 
-          // unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-          // m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
-          // m_next_wb.m_cur_stage_cycles = cur_cycle;
-          // m_next_wb.m_cur_stage++;
+          unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
+          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
+          m_next_wb.m_cur_stage_cycles = cur_cycle;
+          m_next_wb.m_cur_stage++;
+          m_next_wb.print_time_info();
 
           delete mf;
           serviced_client = next_client;
@@ -3145,10 +3168,11 @@ void ldst_unit::writeback() {
         if (m_next_global) {
           m_next_wb = m_next_global->get_inst();
 
-          // unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-          // m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
-          // m_next_wb.m_cur_stage_cycles = cur_cycle;
-          // m_next_wb.m_cur_stage++;
+          unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
+          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
+          m_next_wb.m_cur_stage_cycles = cur_cycle;
+          m_next_wb.m_cur_stage++;
+          m_next_wb.print_time_info();
 
           if (m_next_global->isatomic()) {
             m_core->decrement_atomic_count(
@@ -3165,10 +3189,11 @@ void ldst_unit::writeback() {
           mem_fetch *mf = m_L1D->next_access();
           m_next_wb = mf->get_inst();
 
-          // unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-          // m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
-          // m_next_wb.m_cur_stage_cycles = cur_cycle;
-          // m_next_wb.m_cur_stage++;
+          unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
+          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
+          m_next_wb.m_cur_stage_cycles = cur_cycle;
+          m_next_wb.m_cur_stage++;
+          m_next_wb.print_time_info();
 
           delete mf;
           serviced_client = next_client;
@@ -3642,13 +3667,6 @@ void warp_inst_t::print(FILE *fout) const {
   m_config->gpgpu_ctx->func_sim->ptx_print_insn(pc, fout);
   fprintf(fout, "\n");
 
-  // print per-stage cycle breakdown
-  // fprintf(fout, "  Stage breakdown:\n");
-  // for (unsigned s = 0; s < NUM_WARP_INST_STAGE; s++) {
-  //   fprintf(fout, "    %-20s: stall=%4llu  active=%4llu\n",
-  //           warp_inst_stage_name[s].c_str(),
-  //           m_stall_cycles[s], m_remaining_cycles[s]);
-  // }
 }
 void shader_core_ctx::incexecstat(warp_inst_t *&inst) {
   // Latency numbers for next operations are used to scale the power values

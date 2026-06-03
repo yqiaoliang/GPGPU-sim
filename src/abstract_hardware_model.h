@@ -137,6 +137,35 @@ enum uarch_op_t {
   SPECIALIZED_UNIT_7_OP,
   SPECIALIZED_UNIT_8_OP
 };
+
+// unordered_map<int, std::string> warp_inst_op_type_name = {
+//     {NO_OP, "NO_OP"},         
+//     {ALU_OP, "ALU_OP"},       
+//     {SFU_OP, "SFU_OP"},
+//     {TENSOR_CORE_OP, "TENSOR_CORE_OP"}, 
+//     {DP_OP, "DP_OP"},         
+//     {SP_OP, "SP_OP"},
+//     {INTP_OP, "INTP_OP"},     
+//     {ALU_SFU_OP, "ALU_SFU_OP"}, 
+//     {LOAD_OP, "LOAD_OP"},
+//     {TENSOR_CORE_LOAD_OP, "TENSOR_CORE_LOAD_OP"},
+//     {TENSOR_CORE_STORE_OP, "TENSOR_CORE_STORE_OP"},
+//     {STORE_OP, "STORE_OP"},   
+//     {BRANCH_OP, "BRANCH_OP"},   
+//     {BARRIER_OP, "BARRIER_OP"},
+//     {MEMORY_BARRIER_OP, "MEMORY_BARRIER_OP"},
+//     {CALL_OPS, "CALL_OPS"},   {RET_OPS, "RET_OPS"},     
+//     {EXIT_OPS, "EXIT_OPS"},
+//     {SPECIALIZED_UNIT_1_OP, "SPECIALIZED_UNIT_1_OP"},
+//     {SPECIALIZED_UNIT_2_OP, "SPECIALIZED_UNIT_2_OP"},
+//     {SPECIALIZED_UNIT_3_OP, "SPECIALIZED_UNIT_3_OP"},
+//     {SPECIALIZED_UNIT_4_OP, "SPECIALIZED_UNIT_4_OP"},
+//     {SPECIALIZED_UNIT_5_OP, "SPECIALIZED_UNIT_5_OP"},
+//     {SPECIALIZED_UNIT_6_OP, "SPECIALIZED_UNIT_6_OP"},
+//     {SPECIALIZED_UNIT_7_OP, "SPECIALIZED_UNIT_7_OP"},
+//     {SPECIALIZED_UNIT_8_OP, "SPECIALIZED_UNIT_8_OP"}
+//   };
+
 typedef enum uarch_op_t op_type;
 
 enum uarch_bar_t { NOT_BAR = -1, SYNC = 1, ARRIVE, RED };
@@ -1124,6 +1153,12 @@ class warp_inst_t : public inst_t {
 
     m_depbar_group_no = 0;
     m_reuse_mask = 0;
+
+    m_stall_cycles.resize(NUM_WARP_INST_STAGE, 0);
+    m_remaining_cycles.resize(NUM_WARP_INST_STAGE, 0);
+
+    m_cur_stage = INST_STAGE_NONE;
+    m_cur_stage_cycles = 0;
   }
   virtual ~warp_inst_t() {}
 
@@ -1147,11 +1182,24 @@ class warp_inst_t : public inst_t {
   std::vector<unsigned long long> m_stall_cycles;
   std::vector<unsigned long long> m_remaining_cycles;
 
+  void print_time_info(){
+    printf("warp_pc: 0x%04llx \n", pc);
+    for (unsigned s = 0; s < NUM_WARP_INST_STAGE; s++) {
+      printf("    %-20s: stall=%4llu  remain=%4llu\n",
+              warp_inst_stage_name[s].c_str(),
+              m_stall_cycles[s], m_remaining_cycles[s]);
+    }
+  }
+
   // modifiers
   void broadcast_barrier_reduction(const active_mask_t &access_mask);
   void do_atomic(bool forceDo = false);
   void do_atomic(const active_mask_t &access_mask, bool forceDo = false);
-  void clear() { m_empty = true; }
+  void clear() {
+    m_empty = true;
+    m_cur_stage = INST_STAGE_NONE;
+    m_cur_stage_cycles = 0;
+  }
 
   void issue(const active_mask_t &mask, unsigned warp_id,
              unsigned long long cycle, int dynamic_warp_id, int sch_id,
