@@ -667,7 +667,7 @@ public:
 public:
   bool m_is_busy;
   // bool m_new_issue;
-  unsigned m_bank_num;
+  unsigned m_bank_num; // number of banks in this RFC
   unsigned m_scheduler_id;
   register_set * m_rfc_set;
   register_set * m_out_port_set;
