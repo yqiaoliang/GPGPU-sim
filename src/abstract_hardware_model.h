@@ -28,6 +28,8 @@
 // CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
+#include <unordered_map>
+#include <string>
 
 #ifndef ABSTRACT_HARDWARE_MODEL_INCLUDED
 #define ABSTRACT_HARDWARE_MODEL_INCLUDED
@@ -138,33 +140,6 @@ enum uarch_op_t {
   SPECIALIZED_UNIT_8_OP
 };
 
-// unordered_map<int, std::string> warp_inst_op_type_name = {
-//     {NO_OP, "NO_OP"},         
-//     {ALU_OP, "ALU_OP"},       
-//     {SFU_OP, "SFU_OP"},
-//     {TENSOR_CORE_OP, "TENSOR_CORE_OP"}, 
-//     {DP_OP, "DP_OP"},         
-//     {SP_OP, "SP_OP"},
-//     {INTP_OP, "INTP_OP"},     
-//     {ALU_SFU_OP, "ALU_SFU_OP"}, 
-//     {LOAD_OP, "LOAD_OP"},
-//     {TENSOR_CORE_LOAD_OP, "TENSOR_CORE_LOAD_OP"},
-//     {TENSOR_CORE_STORE_OP, "TENSOR_CORE_STORE_OP"},
-//     {STORE_OP, "STORE_OP"},   
-//     {BRANCH_OP, "BRANCH_OP"},   
-//     {BARRIER_OP, "BARRIER_OP"},
-//     {MEMORY_BARRIER_OP, "MEMORY_BARRIER_OP"},
-//     {CALL_OPS, "CALL_OPS"},   {RET_OPS, "RET_OPS"},     
-//     {EXIT_OPS, "EXIT_OPS"},
-//     {SPECIALIZED_UNIT_1_OP, "SPECIALIZED_UNIT_1_OP"},
-//     {SPECIALIZED_UNIT_2_OP, "SPECIALIZED_UNIT_2_OP"},
-//     {SPECIALIZED_UNIT_3_OP, "SPECIALIZED_UNIT_3_OP"},
-//     {SPECIALIZED_UNIT_4_OP, "SPECIALIZED_UNIT_4_OP"},
-//     {SPECIALIZED_UNIT_5_OP, "SPECIALIZED_UNIT_5_OP"},
-//     {SPECIALIZED_UNIT_6_OP, "SPECIALIZED_UNIT_6_OP"},
-//     {SPECIALIZED_UNIT_7_OP, "SPECIALIZED_UNIT_7_OP"},
-//     {SPECIALIZED_UNIT_8_OP, "SPECIALIZED_UNIT_8_OP"}
-//   };
 
 typedef enum uarch_op_t op_type;
 
@@ -1176,6 +1151,34 @@ class warp_inst_t : public inst_t {
     "WRITEBACK"
   };
 
+  std::unordered_map<int, std::string> warp_inst_op_type_name = {
+    {NO_OP, "NO_OP"},         
+    {ALU_OP, "ALU_OP"},       
+    {SFU_OP, "SFU_OP"},
+    {TENSOR_CORE_OP, "TENSOR_CORE_OP"}, 
+    {DP_OP, "DP_OP"},         
+    {SP_OP, "SP_OP"},
+    {INTP_OP, "INTP_OP"},     
+    {ALU_SFU_OP, "ALU_SFU_OP"}, 
+    {LOAD_OP, "LOAD_OP"},
+    {TENSOR_CORE_LOAD_OP, "TENSOR_CORE_LOAD_OP"},
+    {TENSOR_CORE_STORE_OP, "TENSOR_CORE_STORE_OP"},
+    {STORE_OP, "STORE_OP"},   
+    {BRANCH_OP, "BRANCH_OP"},   
+    {BARRIER_OP, "BARRIER_OP"},
+    {MEMORY_BARRIER_OP, "MEMORY_BARRIER_OP"},
+    {CALL_OPS, "CALL_OPS"},   {RET_OPS, "RET_OPS"},     
+    {EXIT_OPS, "EXIT_OPS"},
+    {SPECIALIZED_UNIT_1_OP, "SPECIALIZED_UNIT_1_OP"},
+    {SPECIALIZED_UNIT_2_OP, "SPECIALIZED_UNIT_2_OP"},
+    {SPECIALIZED_UNIT_3_OP, "SPECIALIZED_UNIT_3_OP"},
+    {SPECIALIZED_UNIT_4_OP, "SPECIALIZED_UNIT_4_OP"},
+    {SPECIALIZED_UNIT_5_OP, "SPECIALIZED_UNIT_5_OP"},
+    {SPECIALIZED_UNIT_6_OP, "SPECIALIZED_UNIT_6_OP"},
+    {SPECIALIZED_UNIT_7_OP, "SPECIALIZED_UNIT_7_OP"},
+    {SPECIALIZED_UNIT_8_OP, "SPECIALIZED_UNIT_8_OP"}
+  };
+
 
   warp_inst_stage_t m_cur_stage;
   unsigned long long m_cur_stage_cycles;
@@ -1183,7 +1186,7 @@ class warp_inst_t : public inst_t {
   std::vector<unsigned long long> m_remaining_cycles;
 
   void print_time_info(){
-    printf("warp_pc: 0x%04llx \n", pc);
+    printf("warp_id: %d, pc: 0x%04llx, op: %s \n", m_warp_id, pc, warp_inst_op_type_name[op].c_str());
     for (unsigned s = 0; s < NUM_WARP_INST_STAGE; s++) {
       printf("    %-20s: stall=%4llu  remain=%4llu\n",
               warp_inst_stage_name[s].c_str(),

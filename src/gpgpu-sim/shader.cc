@@ -898,7 +898,7 @@ void shader_core_ctx::decode() {
     if (pI1) {
       warp_inst_t *pW = const_cast<warp_inst_t *>(pI1);
       unsigned long long current_cycle = m_gpu->gpu_sim_cycle;
-      pW->m_remaining_cycles[pI1->m_cur_stage] = current_cycle - pW->m_cur_stage_cycles;
+      // pW->m_remaining_cycles[pI1->m_cur_stage] = current_cycle - pW->m_cur_stage_cycles;
       pW->m_cur_stage_cycles = current_cycle;
       pW->m_cur_stage++;
 
@@ -917,7 +917,7 @@ void shader_core_ctx::decode() {
       if (pI2) {
         warp_inst_t *pW = const_cast<warp_inst_t *>(pI2);
         unsigned long long current_cycle = m_gpu->gpu_sim_cycle;
-        pW->m_remaining_cycles[pI2->m_cur_stage] = current_cycle - pW->m_cur_stage_cycles;
+        // pW->m_remaining_cycles[pI2->m_cur_stage] = current_cycle - pW->m_cur_stage_cycles;
         pW->m_cur_stage_cycles = current_cycle;
         pW->m_cur_stage++;
 
