@@ -512,7 +512,7 @@ shader_core_ctx::shader_core_ctx(class gpgpu_sim *gpu,
   }
 
   unsigned rfc_num = config->gpgpu_num_sched_per_core * config->gpgpu_rfc_or_oc_per_scheduler_num;
-  m_operand_fetch.init(config->gpgpu_num_sched_per_core, config->gpgpu_rfc_bank_num, rfc_num, 3, config->gpgpu_is_compiler_ctrl_reuse, this);
+  m_operand_fetch.init(config->gpgpu_num_sched_per_core, config->gpgpu_rfc_bank_num, rfc_num, 4, config->gpgpu_is_compiler_ctrl_reuse, this);
 }
 
 shader_core_ctx::~shader_core_ctx() {
@@ -1793,31 +1793,6 @@ void operand_fetch_t::add_ports(std::vector<register_set *> in_ports, std::vecto
   m_ports.out_ports = out_ports;
 }
 
-// void operand_fetch_t::cycle() {
-//   for (unsigned i = 0; i < m_scheduler_num; i++){
-//     for (unsigned j = 0; j < m_rfc_num / m_scheduler_num; j++){
-//       unsigned rfc_id = m_scheduler_num * j + i;
-//       if (m_rfc_caches[rfc_id]->is_busy()) m_rfc_caches[rfc_id]->cycle();
-//       else {
-//         for(unsigned k = 0; k < m_ports.in_ports.size(); k++){
-//           unsigned cur_read_ports = (k + m_last_issued_ports[i]) % m_ports.in_ports.size();
-//           if (m_ports.in_ports[cur_read_ports]->has_ready(true, i)){
-//             warp_inst_t ** cur_scheduler_rfc_port = m_rfc_caches[rfc_id]->m_rfc_set->get_free(); // only one register set
-//             m_ports.in_ports[cur_read_ports]->move_out_to(true, i, *cur_scheduler_rfc_port);
-
-//             m_rfc_caches[rfc_id]->set_busy(true);
-//             m_rfc_caches[rfc_id]->compute_inst_src_operands_cycle(*cur_scheduler_rfc_port);
-//             m_rfc_caches[rfc_id]->m_out_port_set = m_ports.out_ports[cur_read_ports];
-
-//             m_last_issued_ports[i] = cur_read_ports;
-//             break;
-//           }
-//         }
-//       }
-//     }
-//   }
-// }
-
 void operand_fetch_t::cycle() {
   for (unsigned i = 0; i < m_scheduler_num; i++){
     for (unsigned j = 0; j < m_rfc_num / m_scheduler_num; j++){
@@ -1913,17 +1888,9 @@ void register_file_cache_t::cycle() {
               is_bank_read[bank_id] = true;
               m_rfc_slots[i].data_valid = true;
             }
-            // else {
-            //   warp_inst_t *inst = *m_rfc_set->get_ready();
-            //   inst->m_stall_cycles[inst->m_cur_stage]++; 
-            // }
           }
         }
       }
-      // if (!bank_sent_data) {
-      //   fprintf(stderr, "Error: no bank read happens in this cycle but cur_inst_src_operands_remaining_cycle is still greater than 0 (cur_inst_src_operands_remaining_cycle = %u)\n", cur_inst_src_operands_remaining_cycle);
-      //   abort();
-      // }
       if (bank_sent_data) cur_inst_src_operands_remaining_cycle--;
       else {
         warp_inst_t *inst = *m_rfc_set->get_ready();
@@ -1947,6 +1914,10 @@ void register_file_cache_t::compute_inst_src_operands_cycle(warp_inst_t *inst) {
 
   for (unsigned i = 0; i < MAX_REG_OPERANDS; i++){
     if (inst->arch_reg.src[i] > 0){
+      if (i >= m_rfc_slots.size()) {
+        fprintf(stderr, "Error: the number of source operands exceeds the number of rfc slots (src_operand_num = %u, slot_num = %u)\n", src_operand_num + 1, (unsigned)m_rfc_slots.size());
+        abort();
+      }
       src_operand_num++;
       unsigned bank_id = inst->arch_reg.src[i] % m_bank_num;
       if (!is_src_operands_in_cache(inst->warp_id(), inst->arch_reg.src[i], i, false)) {
@@ -1958,14 +1929,14 @@ void register_file_cache_t::compute_inst_src_operands_cycle(warp_inst_t *inst) {
           bank_read_num[bank_id]++;
       // unique_regs.insert(inst->arch_reg.src[i]);
       }
-      else {
-        this_rfc_use_reuse_time++;
-        printf("The schedule unit %d reuse time %d \n", m_scheduler_id, this_rfc_use_reuse_time);
-      }
+      // else {
+      //   this_rfc_use_reuse_time++;
+      //   printf("The schedule unit %d reuse time %d \n", m_scheduler_id, this_rfc_use_reuse_time);
+      // }
     }
   }
 
-  if (src_operand_num > 3){
+  if (src_operand_num > 4){
     fprintf(stderr, "Error: more than 3 source operands in instruction (src_operand_num = %u)\n", src_operand_num);
     abort();
   }
@@ -2350,8 +2321,7 @@ void shader_core_ctx::writeback() {
   }
 
 // m_config->pipe_widths[j]
-  int temp_size = m_config->pipe_widths[EX_WB] * 2;
-  register_set * temp_set = new register_set(temp_size, "temp_set");
+  std::vector<register_set *> temp_set_vec;
   // printf("temp_set.has_free() = %d \n", temp_set->has_free());
 
   while (preg and !pipe_reg->empty() and m_config->gpgpu_is_use_rfc){
@@ -2389,11 +2359,9 @@ void shader_core_ctx::writeback() {
         } 
         else{
           (*preg)->m_stall_cycles[pipe_reg->m_cur_stage] += 1;
-          if (!temp_set->has_free()){
-            fprintf(stderr, "Error: no free slot in temp set to hold the instruction when there is a bank conflict in writeback stage (temp_set_size = %u)\n", temp_size);
-            abort();
-          }
+          register_set *temp_set = new register_set(1, "TEMP_SET");
           temp_set->move_in(*preg);
+          temp_set_vec.push_back(temp_set);
         }
       }
     }
@@ -2428,16 +2396,19 @@ void shader_core_ctx::writeback() {
     }
   }
 
-  while(temp_set->has_ready()){
-    warp_inst_t *temp_inst = *temp_set->get_ready();
+  while(!temp_set_vec.empty()){
+    register_set *temp_set = temp_set_vec.back();
+    temp_set_vec.pop_back();
     if (!m_pipeline_reg[EX_WB].has_free()){
       fprintf(stderr, "Error: no free slot in writeback pipeline register to hold the instruction in temp set when there is a bank conflict in writeback stage (writeback_pipeline_register_size = %u)\n", m_config->pipe_widths[EX_WB]);
       abort();
     }
-    m_pipeline_reg[EX_WB].move_in(temp_inst);
+    m_pipeline_reg[EX_WB].move_in(*temp_set->get_ready());
   }
 
-  delete temp_set;
+  for (auto *temp_set : temp_set_vec) {
+    delete temp_set;
+  }
 
 }
 

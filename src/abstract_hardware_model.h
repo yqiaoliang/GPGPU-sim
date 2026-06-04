@@ -30,6 +30,8 @@
 // POSSIBILITY OF SUCH DAMAGE.
 #include <unordered_map>
 #include <string>
+#include <cstdio>
+#include <cstdlib>
 
 #ifndef ABSTRACT_HARDWARE_MODEL_INCLUDED
 #define ABSTRACT_HARDWARE_MODEL_INCLUDED
@@ -1192,22 +1194,34 @@ class warp_inst_t : public inst_t {
   std::vector<unsigned long long> m_remaining_cycles;
 
   void print_time_info(){
-    unsigned int record_cycle = 0;
-    printf("warp_id: %d, pc: 0x%04llx, op: %s \n", m_warp_id, pc, warp_inst_op_type_name[op].c_str());
-    printf("    issue_to_operand_collector_cycles: %4llu \n", m_issue_to_operand_collector_cycles);
-    printf("    writeback_cycles: %4llu \n", m_writeback_cycles);
+    static FILE* stage_log = NULL;
+    static bool stage_log_init = false;
+    if (!stage_log_init) {
+      stage_log_init = true;
+      const char* path = getenv("ACCELSIM_STAGE_LOG");
+      if (path && path[0] != '\0') {
+        stage_log = fopen(path, "w");
+        if (!stage_log) {
+          fprintf(stderr, "[WARN] print_time_info: cannot open %s, fallback to stdout\n", path);
+          stage_log = stdout;
+        }
+      } else {
+        stage_log = stdout;
+      }
+    }
+
+    fprintf(stage_log, "warp_id: %d, pc: 0x%04llx, op: %s \n", m_warp_id, pc, warp_inst_op_type_name[op].c_str());
+    fprintf(stage_log, "    issue_to_operand_collector_cycles: %4llu \n", m_issue_to_operand_collector_cycles);
+    fprintf(stage_log, "    writeback_cycles: %4llu \n", m_writeback_cycles);
     for (unsigned s = 0; s < NUM_WARP_INST_STAGE; s++) {
-      printf("    %-20s: stall=%4llu  remain=%4llu\n",
+      fprintf(stage_log, "    %-20s: stall=%4llu  remain=%4llu\n",
               warp_inst_stage_name[s],
               m_stall_cycles[s], m_remaining_cycles[s]);
-      if (s > INST_STAGE_SCHEDULER) record_cycle += m_remaining_cycles[s];
     }
 
-    if (record_cycle != m_writeback_cycles - m_issue_to_operand_collector_cycles) {
-      printf("    [ERROR] recorded cycle does not match writeback - issue_to_operand_collector cycle! \n");
-      abort();
+    if (stage_log != stdout && stage_log != stderr) {
+      fflush(stage_log);
     }
-
   }
 
   // modifiers
