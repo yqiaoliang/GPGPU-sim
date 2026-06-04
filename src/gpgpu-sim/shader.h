@@ -1764,6 +1764,8 @@ class shader_core_config : public core_config {
   bool gpgpu_is_use_rfc;
   bool gpgpu_is_compiler_ctrl_reuse;
   int gpgpu_rfc_or_oc_per_scheduler_num;
+  int gpgpu_writeback_stack_deepth;
+  int gpgpu_rfc_bank_num;
 
   unsigned max_sp_latency;
   unsigned max_int_latency;
@@ -2147,6 +2149,7 @@ class shader_core_ctx : public core_t {
   void reinit(unsigned start_thread, unsigned end_thread,
               bool reset_not_completed);
   void issue_block2core(class kernel_info_t &kernel);
+  ~shader_core_ctx();
 
   void cache_flush();
   void cache_invalidate();
@@ -2498,6 +2501,9 @@ class shader_core_ctx : public core_t {
     m_stats->n_simt_to_mem[m_sid] += n_flits;
   }
   bool check_if_non_released_reduction_barrier(warp_inst_t &inst);
+
+  // used for rfc, to sim truth register file access latency, the form is vector[scheduler_id][bank_id]
+  std::vector<std::vector<register_set*>> m_writeback_inst;
 
  protected:
   unsigned inactive_lanes_accesses_sfu(unsigned active_count, double latency) {

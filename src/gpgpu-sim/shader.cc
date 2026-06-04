@@ -503,8 +503,25 @@ shader_core_ctx::shader_core_ctx(class gpgpu_sim *gpu,
   m_occupied_ctas = 0;
   m_occupied_hwtid.reset();
   m_occupied_cta_to_hwtid.clear();
+  m_writeback_inst.resize(m_config->gpgpu_num_sched_per_core);
+  for (int i = 0; i < m_config->gpgpu_num_sched_per_core; i++){
+    m_writeback_inst[i].resize(m_config->gpgpu_rfc_bank_num);
+    for (int j = 0; j < m_config->gpgpu_rfc_bank_num; j++){
+      m_writeback_inst[i][j] = new register_set(m_config->gpgpu_writeback_stack_deepth, ("RFC_SET_" + std::to_string(i) + "_" + std::to_string(j)).c_str());
+    }
+  }
+
   unsigned rfc_num = config->gpgpu_num_sched_per_core * config->gpgpu_rfc_or_oc_per_scheduler_num;
-  m_operand_fetch.init(config->gpgpu_num_sched_per_core, 2, rfc_num, 3, config->gpgpu_is_compiler_ctrl_reuse, this);
+  m_operand_fetch.init(config->gpgpu_num_sched_per_core, config->gpgpu_rfc_bank_num, rfc_num, 3, config->gpgpu_is_compiler_ctrl_reuse, this);
+}
+
+shader_core_ctx::~shader_core_ctx() {
+    for (int i = 0; i < m_config->gpgpu_num_sched_per_core; i++){
+    m_writeback_inst[i].resize(m_config->gpgpu_rfc_bank_num);
+    for (int j = 0; j < m_config->gpgpu_rfc_bank_num; j++){
+      delete m_writeback_inst[i][j];
+    }
+  }
 }
 
 void shader_core_ctx::reinit(unsigned start_thread, unsigned end_thread,
@@ -1064,13 +1081,11 @@ void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
   // }
 
   warp_inst_t *pW = const_cast<warp_inst_t*>(next_inst);
-
   unsigned long long cur_inst_remaining_cycles = m_gpu->gpu_sim_cycle - pW->m_cur_stage_cycles;
   pW->m_remaining_cycles[pW->m_cur_stage] = cur_inst_remaining_cycles;
   pW->m_cur_stage_cycles = m_gpu->gpu_sim_cycle;
-  // printf("warp_inst_t: pc=0x%llx, cur_stage=%d, remaining_cycles=%lld\n",
-  //        pW->pc, pW->m_cur_stage, cur_inst_remaining_cycles);
   pW->m_cur_stage = INST_STAGE_OPERAND_COLLECTOR;
+  pW->m_issue_to_operand_collector_cycles = m_gpu->gpu_sim_cycle;
 
   
   assert(next_inst->valid());
@@ -1839,7 +1854,7 @@ void operand_fetch_t::cycle() {
            fprintf(stderr, "Error: the current stage of the instruction in rfc is not operand collector stage when it is issued to rfc (cur_stage = %u)\n", (*cur_scheduler_rfc_port)-> m_cur_stage);
            abort();
          }
-        (*cur_scheduler_rfc_port)->m_stall_cycles[(*cur_scheduler_rfc_port)->m_cur_stage] = m_rfc_caches[rfc_id]->cur_inst_src_operands_remaining_cycle;
+        // (*cur_scheduler_rfc_port)->m_stall_cycles[(*cur_scheduler_rfc_port)->m_cur_stage] = m_rfc_caches[rfc_id]->cur_inst_src_operands_remaining_cycle;
       }
     }
   }
@@ -1893,17 +1908,27 @@ void register_file_cache_t::cycle() {
         if (!m_rfc_slots[i].data_valid and m_rfc_slots[i].is_this_slot_enabled) {
           unsigned bank_id = m_rfc_slots[i].reg_idx % m_bank_num;
           if (!is_bank_read[bank_id]){
-            bank_sent_data = true;
-            is_bank_read[bank_id] = true;
-            m_rfc_slots[i].data_valid = true;
+            if (!m_core->m_writeback_inst[m_scheduler_id][bank_id]->has_ready()){
+              bank_sent_data = true;
+              is_bank_read[bank_id] = true;
+              m_rfc_slots[i].data_valid = true;
+            }
+            // else {
+            //   warp_inst_t *inst = *m_rfc_set->get_ready();
+            //   inst->m_stall_cycles[inst->m_cur_stage]++; 
+            // }
           }
         }
       }
-      if (!bank_sent_data) {
-        fprintf(stderr, "Error: no bank read happens in this cycle but cur_inst_src_operands_remaining_cycle is still greater than 0 (cur_inst_src_operands_remaining_cycle = %u)\n", cur_inst_src_operands_remaining_cycle);
-        abort();
-      }
-      cur_inst_src_operands_remaining_cycle--;
+      // if (!bank_sent_data) {
+      //   fprintf(stderr, "Error: no bank read happens in this cycle but cur_inst_src_operands_remaining_cycle is still greater than 0 (cur_inst_src_operands_remaining_cycle = %u)\n", cur_inst_src_operands_remaining_cycle);
+      //   abort();
+      // }
+      if (bank_sent_data) cur_inst_src_operands_remaining_cycle--;
+      else {
+        warp_inst_t *inst = *m_rfc_set->get_ready();
+        inst->m_stall_cycles[inst->m_cur_stage]++; 
+       }
     }
     else issue_inst_to_next_stage();
 
@@ -2021,11 +2046,16 @@ void register_file_cache_t::issue_inst_to_next_stage() {
 
     unsigned long long cur_inst_remaining_cycles = m_core->get_gpu()->gpu_sim_cycle - issued_inst->m_cur_stage_cycles;
     issued_inst->m_remaining_cycles[issued_inst->m_cur_stage] = cur_inst_remaining_cycles;
+    // issued_inst->m_stall_cycles[issued_inst->m_cur_stage] = cur_inst_remaining_cycles - issued_inst->m_stall_cycles[issued_inst->m_cur_stage];
     issued_inst->m_cur_stage_cycles = m_core->get_gpu()->gpu_sim_cycle;
     issued_inst->m_cur_stage++;
 
     m_out_port_set->move_in(true, m_scheduler_id, *m_rfc_set->get_ready());
     m_is_busy = false;
+  }
+  else {
+    warp_inst_t *cur_inst = *m_rfc_set->get_ready();
+    cur_inst->m_stall_cycles[cur_inst->m_cur_stage] += 1;
   }
 }
 
@@ -2149,7 +2179,10 @@ void shader_core_ctx::execute() {
         m_fu[n]->can_issue(**ready_reg)) {
       bool schedule_wb_now = !m_fu[n]->stallable();
       int resbus = -1;
-      if (schedule_wb_now &&
+      if (m_config->gpgpu_is_use_rfc){
+        m_fu[n]->issue(issue_inst);
+      }
+      else if (schedule_wb_now &&
           (resbus = test_res_bus((*ready_reg)->latency)) != -1) {
         assert((*ready_reg)->latency < MAX_ALU_LATENCY);
         m_result_bus[resbus]->set((*ready_reg)->latency);
@@ -2158,6 +2191,8 @@ void shader_core_ctx::execute() {
         m_fu[n]->issue(issue_inst);
       } else {
         // stall issue (cannot reserve result bus)
+        unsigned wb_stage = static_cast<unsigned>(INST_STAGE_WRITEBACK);
+        (*ready_reg)->m_stall_cycles[wb_stage] += 1;
       }
     }
   }
@@ -2267,7 +2302,7 @@ void shader_core_ctx::writeback() {
 
   warp_inst_t **preg = m_pipeline_reg[EX_WB].get_ready();
   warp_inst_t *pipe_reg = (preg == NULL) ? NULL : *preg;
-  while (preg and !pipe_reg->empty()) {
+  while (preg and !pipe_reg->empty() and !m_config->gpgpu_is_use_rfc) {
     /*
      * Right now, the writeback stage drains all waiting instructions
      * assuming there are enough ports in the register file or the
@@ -2293,8 +2328,9 @@ void shader_core_ctx::writeback() {
 
      unsigned long long cur_cycle = m_gpu->gpu_sim_cycle;
      pipe_reg->m_remaining_cycles[pipe_reg->m_cur_stage] = cur_cycle - pipe_reg->m_cur_stage_cycles;
-     pipe_reg->m_cur_stage_cycles = cur_cycle - pipe_reg->m_cur_stage_cycles;
+     pipe_reg->m_cur_stage_cycles = cur_cycle - pipe_reg->m_cur_stage_cycles + pipe_reg->m_stall_cycles[pipe_reg->m_cur_stage];
      pipe_reg->m_cur_stage++;
+     pipe_reg->m_writeback_cycles = m_gpu->gpu_sim_cycle;
      pipe_reg->print_time_info();
 
 
@@ -2312,6 +2348,97 @@ void shader_core_ctx::writeback() {
     preg = m_pipeline_reg[EX_WB].get_ready();
     pipe_reg = (preg == NULL) ? NULL : *preg;
   }
+
+// m_config->pipe_widths[j]
+  int temp_size = m_config->pipe_widths[EX_WB] * 2;
+  register_set * temp_set = new register_set(temp_size, "temp_set");
+  // printf("temp_set.has_free() = %d \n", temp_set->has_free());
+
+  while (preg and !pipe_reg->empty() and m_config->gpgpu_is_use_rfc){
+    unsigned int dst_reg_num = 0;
+    for(int i = 0; i < MAX_REG_OPERANDS; i++){
+      if (pipe_reg->arch_reg.dst[i] > 0) dst_reg_num++;
+    }
+
+    if (dst_reg_num > 1){
+      printf("Error: more than 1 destination registers in instruction (dst_reg_num = %u)\n", dst_reg_num);
+      abort();
+    }
+
+    if (dst_reg_num == 0){
+      unsigned warp_id = pipe_reg->warp_id();
+      m_scoreboard->releaseRegisters(pipe_reg);
+      m_warp[warp_id]->dec_inst_in_pipeline();
+      warp_inst_complete(*pipe_reg);
+      m_gpu->gpu_sim_insn_last_update_sid = m_sid;
+      m_gpu->gpu_sim_insn_last_update = m_gpu->gpu_sim_cycle;
+      m_last_inst_gpu_sim_cycle = m_gpu->gpu_sim_cycle;
+      m_last_inst_gpu_tot_sim_cycle = m_gpu->gpu_tot_sim_cycle;
+      pipe_reg->clear();
+      preg = m_pipeline_reg[EX_WB].get_ready();
+      pipe_reg = (preg == NULL) ? NULL : *preg;
+      continue;
+    }
+
+    for (int i = 0; i < MAX_REG_OPERANDS; i++){
+      if (pipe_reg->arch_reg.dst[i] > 0){
+        unsigned int bank_idx = pipe_reg->arch_reg.dst[i] % m_config->gpgpu_rfc_bank_num;
+        unsigned scheduler_idx = pipe_reg->get_schd_id();
+        if (m_writeback_inst[scheduler_idx][bank_idx]->has_free()) {
+          m_writeback_inst[scheduler_idx][bank_idx]->move_in(*preg);
+        } 
+        else{
+          (*preg)->m_stall_cycles[pipe_reg->m_cur_stage] += 1;
+          if (!temp_set->has_free()){
+            fprintf(stderr, "Error: no free slot in temp set to hold the instruction when there is a bank conflict in writeback stage (temp_set_size = %u)\n", temp_size);
+            abort();
+          }
+          temp_set->move_in(*preg);
+        }
+      }
+    }
+
+    preg = m_pipeline_reg[EX_WB].get_ready();
+    pipe_reg = (preg == NULL) ? NULL : *preg;
+  }
+  if (m_config->gpgpu_is_use_rfc) {
+    for (unsigned int i = 0; i < m_config->gpgpu_num_sched_per_core; i++){
+      for (unsigned int j = 0; j < m_config->gpgpu_rfc_bank_num; j++){
+        if (m_writeback_inst[i][j]->has_ready()) {
+          warp_inst_t *inst = *m_writeback_inst[i][j]->get_ready();
+
+          unsigned long long cur_cycle = m_gpu->gpu_sim_cycle;
+          inst->m_remaining_cycles[inst->m_cur_stage] = cur_cycle - inst->m_cur_stage_cycles;
+          inst->m_cur_stage_cycles = m_gpu->gpu_sim_cycle;
+          inst->m_cur_stage++;
+          inst->m_writeback_cycles = m_gpu->gpu_sim_cycle;
+          inst->print_time_info();
+
+          unsigned warp_id = inst->warp_id();
+          m_scoreboard->releaseRegisters(inst);
+          m_warp[warp_id]->dec_inst_in_pipeline();
+          warp_inst_complete(*inst);
+          m_gpu->gpu_sim_insn_last_update_sid = m_sid;
+          m_gpu->gpu_sim_insn_last_update = m_gpu->gpu_sim_cycle;
+          m_last_inst_gpu_sim_cycle = m_gpu->gpu_sim_cycle;
+          m_last_inst_gpu_tot_sim_cycle = m_gpu->gpu_tot_sim_cycle;
+          inst->clear();
+        }
+      }
+    }
+  }
+
+  while(temp_set->has_ready()){
+    warp_inst_t *temp_inst = *temp_set->get_ready();
+    if (!m_pipeline_reg[EX_WB].has_free()){
+      fprintf(stderr, "Error: no free slot in writeback pipeline register to hold the instruction in temp set when there is a bank conflict in writeback stage (writeback_pipeline_register_size = %u)\n", m_config->pipe_widths[EX_WB]);
+      abort();
+    }
+    m_pipeline_reg[EX_WB].move_in(temp_inst);
+  }
+
+  delete temp_set;
+
 }
 
 bool ldst_unit::shared_cycle(warp_inst_t &inst, mem_stage_stall_type &rc_fail,
@@ -2900,7 +3027,9 @@ void pipelined_simd_unit::cycle() {
       assert(0);
     }
     unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-    inst->m_remaining_cycles[inst->m_cur_stage] = cur_cycle - inst->m_cur_stage_cycles;
+    unsigned int wb_stage = static_cast<unsigned int>(INST_STAGE_WRITEBACK);
+    // the writeback stall time has been included in this, so we need to subtract it
+    inst->m_remaining_cycles[inst->m_cur_stage] = cur_cycle - inst->m_cur_stage_cycles - inst->m_stall_cycles[wb_stage];
     inst->m_cur_stage++;
     inst->m_cur_stage_cycles = cur_cycle;
     
@@ -3119,9 +3248,10 @@ void ldst_unit::writeback() {
           m_next_wb = *m_pipeline_reg[0];
 
           unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
+          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles + m_next_wb.m_stall_cycles[m_next_wb.m_cur_stage];
           m_next_wb.m_cur_stage_cycles = cur_cycle;
           m_next_wb.m_cur_stage++;
+          m_next_wb.m_writeback_cycles = cur_cycle;
           m_next_wb.print_time_info();
 
           if (m_next_wb.isatomic()) {
@@ -3140,9 +3270,10 @@ void ldst_unit::writeback() {
           m_next_wb = mf->get_inst();
 
           unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
+          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles + m_next_wb.m_stall_cycles[m_next_wb.m_cur_stage];
           m_next_wb.m_cur_stage_cycles = cur_cycle;
           m_next_wb.m_cur_stage++;
+          m_next_wb.m_writeback_cycles = cur_cycle;
           m_next_wb.print_time_info();
 
           delete mf;
@@ -3155,9 +3286,10 @@ void ldst_unit::writeback() {
           m_next_wb = mf->get_inst();
 
           unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
+          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles + m_next_wb.m_stall_cycles[m_next_wb.m_cur_stage];
           m_next_wb.m_cur_stage_cycles = cur_cycle;
           m_next_wb.m_cur_stage++;
+          m_next_wb.m_writeback_cycles = cur_cycle;
           m_next_wb.print_time_info();
 
           delete mf;
@@ -3169,9 +3301,10 @@ void ldst_unit::writeback() {
           m_next_wb = m_next_global->get_inst();
 
           unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
+          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles + m_next_wb.m_stall_cycles[m_next_wb.m_cur_stage];
           m_next_wb.m_cur_stage_cycles = cur_cycle;
           m_next_wb.m_cur_stage++;
+          m_next_wb.m_writeback_cycles = cur_cycle;
           m_next_wb.print_time_info();
 
           if (m_next_global->isatomic()) {
@@ -3190,9 +3323,10 @@ void ldst_unit::writeback() {
           m_next_wb = mf->get_inst();
 
           unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles;
+          m_next_wb.m_remaining_cycles[m_next_wb.m_cur_stage] = cur_cycle - m_next_wb.m_cur_stage_cycles + m_next_wb.m_stall_cycles[m_next_wb.m_cur_stage];
           m_next_wb.m_cur_stage_cycles = cur_cycle;
           m_next_wb.m_cur_stage++;
+          m_next_wb.m_writeback_cycles = cur_cycle;
           m_next_wb.print_time_info();
 
           delete mf;

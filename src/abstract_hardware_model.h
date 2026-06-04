@@ -1106,6 +1106,8 @@ class warp_inst_t : public inst_t {
 
     m_cur_stage = INST_STAGE_NONE;
     m_cur_stage_cycles = 0;
+    m_issue_to_operand_collector_cycles = 0;
+    m_writeback_cycles = 0;
   }
   warp_inst_t(const core_config *config) {
     m_uid = 0;
@@ -1134,6 +1136,8 @@ class warp_inst_t : public inst_t {
 
     m_cur_stage = INST_STAGE_NONE;
     m_cur_stage_cycles = 0;
+    m_issue_to_operand_collector_cycles = 0;
+    m_writeback_cycles = 0;
   }
   virtual ~warp_inst_t() {}
 
@@ -1143,7 +1147,7 @@ class warp_inst_t : public inst_t {
   #define NUM_WARP_INST_STALL NUM_WARP_INST_STAGE
   #define NUM_WARP_INST_REMAINING NUM_WARP_INST_STAGE
 
-  std::string warp_inst_stage_name[NUM_WARP_INST_STAGE]={
+  static inline constexpr const char* warp_inst_stage_name[NUM_WARP_INST_STAGE] = {
     "NONE",
     "SCHEDULER",
     "OPERAND_COLLECTOR",
@@ -1151,7 +1155,7 @@ class warp_inst_t : public inst_t {
     "WRITEBACK"
   };
 
-  std::unordered_map<int, std::string> warp_inst_op_type_name = {
+  static inline std::unordered_map<int, std::string> warp_inst_op_type_name = {
     {NO_OP, "NO_OP"},         
     {ALU_OP, "ALU_OP"},       
     {SFU_OP, "SFU_OP"},
@@ -1182,16 +1186,28 @@ class warp_inst_t : public inst_t {
 
   warp_inst_stage_t m_cur_stage;
   unsigned long long m_cur_stage_cycles;
+  unsigned long long m_issue_to_operand_collector_cycles;
+  unsigned long long m_writeback_cycles;
   std::vector<unsigned long long> m_stall_cycles;
   std::vector<unsigned long long> m_remaining_cycles;
 
   void print_time_info(){
+    unsigned int record_cycle = 0;
     printf("warp_id: %d, pc: 0x%04llx, op: %s \n", m_warp_id, pc, warp_inst_op_type_name[op].c_str());
+    printf("    issue_to_operand_collector_cycles: %4llu \n", m_issue_to_operand_collector_cycles);
+    printf("    writeback_cycles: %4llu \n", m_writeback_cycles);
     for (unsigned s = 0; s < NUM_WARP_INST_STAGE; s++) {
       printf("    %-20s: stall=%4llu  remain=%4llu\n",
-              warp_inst_stage_name[s].c_str(),
+              warp_inst_stage_name[s],
               m_stall_cycles[s], m_remaining_cycles[s]);
+      if (s > INST_STAGE_SCHEDULER) record_cycle += m_remaining_cycles[s];
     }
+
+    if (record_cycle != m_writeback_cycles - m_issue_to_operand_collector_cycles) {
+      printf("    [ERROR] recorded cycle does not match writeback - issue_to_operand_collector cycle! \n");
+      abort();
+    }
+
   }
 
   // modifiers
@@ -1202,6 +1218,10 @@ class warp_inst_t : public inst_t {
     m_empty = true;
     m_cur_stage = INST_STAGE_NONE;
     m_cur_stage_cycles = 0;
+    m_issue_to_operand_collector_cycles = 0;
+    m_writeback_cycles = 0;
+    fill(m_stall_cycles.begin(), m_stall_cycles.end(), 0);
+    fill(m_remaining_cycles.begin(), m_remaining_cycles.end(), 0);
   }
 
   void issue(const active_mask_t &mask, unsigned warp_id,

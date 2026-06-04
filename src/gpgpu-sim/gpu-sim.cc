@@ -509,6 +509,11 @@ void shader_core_config::reg_options(class OptionParser *opp) {
   option_parser_register(opp, "-gpgpu_rfc_or_oc_per_scheduler_num", OPT_INT32,
                          &gpgpu_rfc_or_oc_per_scheduler_num,
                          "Number of RFC/OC units per scheduler (default = 1)", "1");
+  option_parser_register(opp, "-gpgpu_rfc_bank_num", OPT_INT32, &gpgpu_rfc_bank_num,
+                         "Number of RFC banks (default = 2)", "2");
+  option_parser_register(opp, "-gpgpu_writeback_stack_deepth", OPT_INT32,
+                         &gpgpu_writeback_stack_deepth,
+                         "Deepth of the writeback stack for RFC (default = 4)", "4");
   option_parser_register(opp, "-gpgpu_enable_specialized_operand_collector",
                          OPT_BOOL, &enable_specialized_operand_collector,
                          "enable_specialized_operand_collector", "1");
