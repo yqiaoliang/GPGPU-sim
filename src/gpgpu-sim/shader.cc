@@ -1829,7 +1829,6 @@ void operand_fetch_t::cycle() {
            fprintf(stderr, "Error: the current stage of the instruction in rfc is not operand collector stage when it is issued to rfc (cur_stage = %u)\n", (*cur_scheduler_rfc_port)-> m_cur_stage);
            abort();
          }
-        // (*cur_scheduler_rfc_port)->m_stall_cycles[(*cur_scheduler_rfc_port)->m_cur_stage] = m_rfc_caches[rfc_id]->cur_inst_src_operands_remaining_cycle;
       }
     }
   }
@@ -1855,7 +1854,9 @@ register_file_cache_t::register_file_cache_t(unsigned scheduler_id, unsigned ban
   m_rfc_set = new register_set(1, ("RFC_SET_" + std::to_string(scheduler_id)).c_str());
   m_rfc_slots.resize(slot_num);
   for (unsigned i = 0; i < slot_num; i++) init_rfc_slots(i);
-  cur_inst_src_operands_remaining_cycle = 0;
+  operand_fetch_remaining_cycles.resize(bank_num, 0);
+  operand_fetch_used_time = 0;
+  expected_fetch_cycle = 0;
   this_rfc_use_reuse_time = 0;
   m_is_compiler_ctrl_reuse = is_compiler_ctrl_reuse;
 }
@@ -1871,34 +1872,36 @@ void register_file_cache_t::init_rfc_slots(unsigned slot_idx) {
   m_rfc_slots[slot_idx].data_valid = false;
   m_rfc_slots[slot_idx].is_reuse = false;
   m_rfc_slots[slot_idx].is_this_slot_enabled = false;
-
 }
 
 void register_file_cache_t::cycle() {
   if (m_is_busy){
-    if (cur_inst_src_operands_remaining_cycle > 0) {
-      bool bank_sent_data = false;
+    bool is_issue_ready = true;
+    for (int i = 0; i < operand_fetch_remaining_cycles.size(); i++){
+      if (operand_fetch_remaining_cycles[i] > 0) {  
+        is_issue_ready = false;
+        break;
+      }
+    }
+
+
+    if (!is_issue_ready){
+      operand_fetch_used_time++;
       std::vector<bool> is_bank_read(m_bank_num, false);
       for (unsigned i = 0; i < m_rfc_slots.size(); i++){
         if (!m_rfc_slots[i].data_valid and m_rfc_slots[i].is_this_slot_enabled) {
           unsigned bank_id = m_rfc_slots[i].reg_idx % m_bank_num;
           if (!is_bank_read[bank_id]){
             if (!m_core->m_writeback_inst[m_scheduler_id][bank_id]->has_ready()){
-              bank_sent_data = true;
               is_bank_read[bank_id] = true;
               m_rfc_slots[i].data_valid = true;
+              operand_fetch_remaining_cycles[bank_id]--;
             }
           }
         }
       }
-      if (bank_sent_data) cur_inst_src_operands_remaining_cycle--;
-      else {
-        warp_inst_t *inst = *m_rfc_set->get_ready();
-        inst->m_stall_cycles[inst->m_cur_stage]++; 
-       }
     }
     else issue_inst_to_next_stage();
-
     return;
   }
 }
@@ -1908,8 +1911,6 @@ register_file_cache_t::~register_file_cache_t() {
 }
 
 void register_file_cache_t::compute_inst_src_operands_cycle(warp_inst_t *inst) {
-  std::vector<unsigned> bank_read_num(m_bank_num, 0);
-  // std::unordered_set<unsigned> unique_regs;
   unsigned src_operand_num = 0;
 
   for (unsigned i = 0; i < MAX_REG_OPERANDS; i++){
@@ -1926,33 +1927,24 @@ void register_file_cache_t::compute_inst_src_operands_cycle(warp_inst_t *inst) {
           m_rfc_slots[i].data_valid = false;
           m_rfc_slots[i].is_reuse = false;
           m_rfc_slots[i].is_this_slot_enabled = true;
-          bank_read_num[bank_id]++;
-      // unique_regs.insert(inst->arch_reg.src[i]);
+          operand_fetch_remaining_cycles[bank_id]++;
       }
-      // else {
-      //   this_rfc_use_reuse_time++;
-      //   printf("The schedule unit %d reuse time %d \n", m_scheduler_id, this_rfc_use_reuse_time);
-      // }
     }
   }
 
   if (src_operand_num > 4){
-    fprintf(stderr, "Error: more than 3 source operands in instruction (src_operand_num = %u)\n", src_operand_num);
+    fprintf(stderr, "Error: more than 4 source operands in instruction (src_operand_num = %u)\n", src_operand_num);
     abort();
   }
 
   unsigned max_bank_read_num = 0;
   for (unsigned i = 0; i < m_bank_num; i++){
-    if (bank_read_num[i] > max_bank_read_num){
-      max_bank_read_num = bank_read_num[i];
+    if (operand_fetch_remaining_cycles[i] > max_bank_read_num){
+      max_bank_read_num = operand_fetch_remaining_cycles[i];
     }
   }
 
-  cur_inst_src_operands_remaining_cycle = max_bank_read_num;
-  // cur_inst_src_operands_remaining_cycle = 0;
-  // printf("The warp %d in scheduler %d instruction with pc = %d needs to read source operands from register file for %d cycles \n", 
-  //       inst->warp_id(), m_scheduler_id, inst->pc, cur_inst_src_operands_remaining_cycle);
-  
+  expected_fetch_cycle = max_bank_read_num;
 }
 
 bool register_file_cache_t::is_src_operands_in_cache(unsigned warp_idx, unsigned reg_idx, unsigned slot_idx, bool is_crossbar) {
@@ -1999,34 +1991,44 @@ void register_file_cache_t::issue_inst_to_next_stage() {
     }
   }
 
-  
-
   if (m_out_port_set->has_free(true, m_scheduler_id)){
-    // printf("The instruction in warp %d with pc = %d is issued to next stage from register file cache (scheduler_id = %u)\n", 
-        // m_rfc_slots[0].warp_idx, m_rfc_slots[0].reg_idx, m_scheduler_id);
-    set_reuse(*m_rfc_set->get_ready());
-
-    for (unsigned i = 0; i < m_rfc_slots.size(); i++){
-      if (!m_rfc_slots[i].is_reuse) init_rfc_slots(i);
-      else {
-        m_rfc_slots[i].data_valid = false;
-        m_rfc_slots[i].is_this_slot_enabled = false;
-      }
-    }
     warp_inst_t *issued_inst = *m_rfc_set->get_ready();
-
     unsigned long long cur_inst_remaining_cycles = m_core->get_gpu()->gpu_sim_cycle - issued_inst->m_cur_stage_cycles;
     issued_inst->m_remaining_cycles[issued_inst->m_cur_stage] = cur_inst_remaining_cycles;
-    // issued_inst->m_stall_cycles[issued_inst->m_cur_stage] = cur_inst_remaining_cycles - issued_inst->m_stall_cycles[issued_inst->m_cur_stage];
+    issued_inst->m_stall_cycles[issued_inst->m_cur_stage] = operand_fetch_used_time - expected_fetch_cycle;
     issued_inst->m_cur_stage_cycles = m_core->get_gpu()->gpu_sim_cycle;
     issued_inst->m_cur_stage++;
 
+    if (operand_fetch_used_time < expected_fetch_cycle) {
+      fprintf(stderr, "Error: instruction issued to next stage before source operands are ready (used_time = %u, expected_time = %u)\n", operand_fetch_used_time, expected_fetch_cycle);
+      abort();
+    }
+
+    reset_rfc();
     m_out_port_set->move_in(true, m_scheduler_id, *m_rfc_set->get_ready());
-    m_is_busy = false;
+    
   }
   else {
     warp_inst_t *cur_inst = *m_rfc_set->get_ready();
     cur_inst->m_stall_cycles[cur_inst->m_cur_stage] += 1;
+  }
+}
+
+void register_file_cache_t::reset_rfc() {
+  m_is_busy = false;
+  operand_fetch_used_time = 0;
+  expected_fetch_cycle = 0;
+  for (unsigned i = 0; i < m_bank_num; i++){
+    operand_fetch_remaining_cycles[i] = 0;
+  }
+
+  set_reuse(*m_rfc_set->get_ready());
+  for (unsigned i = 0; i < m_rfc_slots.size(); i++){
+    if (!m_rfc_slots[i].is_reuse) init_rfc_slots(i);
+    else {
+      m_rfc_slots[i].data_valid = false;
+      m_rfc_slots[i].is_this_slot_enabled = false;
+    }
   }
 }
 
@@ -2999,7 +3001,7 @@ void pipelined_simd_unit::cycle() {
     }
     unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
     unsigned int wb_stage = static_cast<unsigned int>(INST_STAGE_WRITEBACK);
-    // the writeback stall time has been included in this, so we need to subtract it
+    // the writeback stall time has been included in this, so we need to subtract it, only not use rfc has useful
     inst->m_remaining_cycles[inst->m_cur_stage] = cur_cycle - inst->m_cur_stage_cycles - inst->m_stall_cycles[wb_stage];
     inst->m_cur_stage++;
     inst->m_cur_stage_cycles = cur_cycle;
@@ -4800,7 +4802,7 @@ void opndcoll_rfu_t::dispatch_ready_cu() {
               m_shader->get_config()->warp_size);  // cu->get_active_count());
         }
       }
-      cu->dispatch();
+      cu->dispatch(m_shader->get_gpu()->gpu_sim_cycle);
     }
   }
 }
@@ -4956,8 +4958,19 @@ bool opndcoll_rfu_t::collector_unit_t::allocate(register_set *pipeline_reg_set,
   return false;
 }
 
-void opndcoll_rfu_t::collector_unit_t::dispatch() {
+void opndcoll_rfu_t::collector_unit_t::dispatch(unsigned long long cur_cycle) {
   assert(m_not_ready.none());
+
+  if (m_warp->m_cur_stage != INST_STAGE_OPERAND_COLLECTOR) {
+    printf(
+        "Error: trying to dispatch instruction that is not in operand collector "
+        "stage\n");
+    abort();
+  }
+  m_warp->m_remaining_cycles[m_warp->m_cur_stage] = cur_cycle - m_warp->m_cur_stage_cycles;
+  m_warp->m_cur_stage_cycles = cur_cycle;
+  m_warp->m_cur_stage++;
+
   m_output_register->move_in(m_sub_core_model, m_reg_id, m_warp);
   m_free = true;
   m_output_register = NULL;

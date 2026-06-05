@@ -70,3 +70,6 @@ setup
 .DS_Store
 .DS_store
 __pycache__/
+
+# config
+configs/tested-cfgs/temp/

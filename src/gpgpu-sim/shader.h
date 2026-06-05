@@ -652,6 +652,7 @@ public:
   bool is_busy() const {return m_is_busy;}
   void set_busy(bool status) {m_is_busy = status;}
   void init_rfc_slots(unsigned slot_idx);
+  void reset_rfc();
 
 
 
@@ -672,7 +673,9 @@ public:
   register_set * m_rfc_set;
   register_set * m_out_port_set;
   std::vector<register_file_cache_slot_t> m_rfc_slots;
-  unsigned cur_inst_src_operands_remaining_cycle;
+  unsigned operand_fetch_used_time;
+  unsigned expected_fetch_cycle;
+  std::vector<int> operand_fetch_remaining_cycles;
   unsigned this_rfc_use_reuse_time;
   shader_core_ctx *m_core;
   bool m_is_compiler_ctrl_reuse;
@@ -1035,7 +1038,7 @@ class opndcoll_rfu_t {  // operand collector based register file unit
     void collect_operand(unsigned op) { m_not_ready.reset(op); }
     unsigned get_num_operands() const { return m_warp->get_num_operands(); }
     unsigned get_num_regs() const { return m_warp->get_num_regs(); }
-    void dispatch();
+    void dispatch(unsigned long long cycle);
     bool is_free() { return m_free; }
 
    private:
