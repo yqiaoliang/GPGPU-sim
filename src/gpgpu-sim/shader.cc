@@ -512,7 +512,19 @@ shader_core_ctx::shader_core_ctx(class gpgpu_sim *gpu,
   }
 
   unsigned rfc_num = config->gpgpu_num_sched_per_core * config->gpgpu_rfc_or_oc_per_scheduler_num;
-  m_operand_fetch.init(config->gpgpu_num_sched_per_core, config->gpgpu_rfc_bank_num, rfc_num, 4, config->gpgpu_is_compiler_ctrl_reuse, this);
+
+
+  operand_fetch_init_param_t* fetch_param = new operand_fetch_init_param_t;
+  fetch_param->scheduler_num = config->gpgpu_num_sched_per_core;
+  fetch_param->bank_num = config->gpgpu_rfc_bank_num;
+  fetch_param->rfc_num = rfc_num;
+  fetch_param->slot_num = 4;
+  fetch_param->is_compiler_ctrl_reuse = config->gpgpu_is_compiler_ctrl_reuse;
+  fetch_param->core = this;
+
+  m_operand_fetch.init(fetch_param);
+
+  delete fetch_param;
 }
 
 shader_core_ctx::~shader_core_ctx() {
@@ -1770,21 +1782,47 @@ void swl_scheduler::order_warps() {
   }
 }
 
-void operand_fetch_t::init(unsigned scheduler_num, unsigned bank_num, unsigned rfc_num, unsigned slot_num, bool is_compiler_ctrl_reuse, shader_core_ctx *core) {
-  m_scheduler_num = scheduler_num;
-  m_rfc_num = rfc_num;
-  m_is_compiler_ctrl_reuse = is_compiler_ctrl_reuse;
-  m_core = core;
-  // printf("test_0\n");
+void operand_fetch_t::init(operand_fetch_init_param_t* init_param) {
+  m_scheduler_num = init_param->scheduler_num;
+  m_rfc_num = init_param->rfc_num;
+  m_is_compiler_ctrl_reuse = init_param->is_compiler_ctrl_reuse;
+  m_core = init_param->core;
 
   if (m_rfc_num % m_scheduler_num != 0) {
     fprintf(stderr, "Error: m_rfc_num should be a multiple of m_scheduler_num (m_rfc_num = %u, m_scheduler_num = %u)\n", m_rfc_num, m_scheduler_num);
     abort();
   }
 
+  for (unsigned i = 0; i < m_scheduler_num; i++){
+    m_last_read_rfc_idx.push_back(0);
+    m_all_bank_status.push_back(std::vector<bool>(init_param->bank_num, false));
+    for (unsigned j = 0; j < init_param->bank_num; j++){
+      m_all_bank_status[i][j] = false;
+    }
+  }
+
   for (unsigned i = 0; i < m_rfc_num; i++){
     m_last_issued_ports.push_back(0);
-    m_rfc_caches.push_back(new register_file_cache_t(i % m_scheduler_num, bank_num, slot_num, is_compiler_ctrl_reuse, core));
+
+    register_file_init_param_t* rfc_init_param = new register_file_init_param_t();
+    rfc_init_param->scheduler_id = i % m_scheduler_num;
+    rfc_init_param->bank_num = init_param->bank_num;
+    rfc_init_param->slot_num = init_param->slot_num;
+    rfc_init_param->is_compiler_ctrl_reuse = init_param->is_compiler_ctrl_reuse;
+    rfc_init_param->core = init_param->core;
+    rfc_init_param->bank_status = &m_all_bank_status[i % m_scheduler_num];
+
+    m_rfc_caches.push_back(new register_file_cache_t(rfc_init_param));
+
+    delete rfc_init_param;
+  }
+
+
+}
+
+operand_fetch_t::~operand_fetch_t() {
+  for (unsigned i = 0; i < m_rfc_caches.size(); i++){
+    delete m_rfc_caches[i];
   }
 }
 
@@ -1793,11 +1831,26 @@ void operand_fetch_t::add_ports(std::vector<register_set *> in_ports, std::vecto
   m_ports.out_ports = out_ports;
 }
 
-void operand_fetch_t::cycle(int step_time) {
+void operand_fetch_t::init_all_bank_status() {
   for (unsigned i = 0; i < m_scheduler_num; i++){
-    for (unsigned j = 0; j < m_rfc_num / m_scheduler_num; j++){
-      unsigned rfc_id = m_scheduler_num * j + i;
-      if (m_rfc_caches[rfc_id]->is_busy()) m_rfc_caches[rfc_id]->cycle(step_time);
+    for (unsigned j = 0; j < m_all_bank_status[i].size(); j++){
+      m_all_bank_status[i][j] = false;
+    }
+  }
+}
+
+void operand_fetch_t::cycle(int step_time) {
+  init_all_bank_status();
+
+  for (unsigned i = 0; i < m_scheduler_num; i++){
+    unsigned m_rfc_per_scheduler = m_rfc_num / m_scheduler_num;
+    unsigned start_idx = m_last_read_rfc_idx[i];
+    for (unsigned j = 0; j < m_rfc_per_scheduler; j++){
+      unsigned rfc_id = m_scheduler_num * (j + start_idx) + i;
+      if (m_rfc_caches[rfc_id]->is_busy()) {
+        m_rfc_caches[rfc_id]->cycle(step_time);
+        m_last_read_rfc_idx[i] = (j + start_idx) % m_rfc_per_scheduler;
+      }
       else if (step_time == 0){
         unsigned rr_port = -1; // round robin port
         unsigned choosen_port = -1;
@@ -1845,20 +1898,21 @@ unsigned operand_fetch_t::rfc_reuse_time(unsigned rfc_idx, warp_inst_t *inst) {
 }
 
 
-register_file_cache_t::register_file_cache_t(unsigned scheduler_id, unsigned bank_num, unsigned slot_num, bool is_compiler_ctrl_reuse, shader_core_ctx *core) {
+register_file_cache_t::register_file_cache_t(register_file_init_param_t* init_param) {
   m_is_busy = false;
   // m_new_issue = false;
-  m_bank_num = bank_num;
-  m_core = core;
-  m_scheduler_id = scheduler_id;
-  m_rfc_set = new register_set(1, ("RFC_SET_" + std::to_string(scheduler_id)).c_str());
-  m_rfc_slots.resize(slot_num);
-  for (unsigned i = 0; i < slot_num; i++) init_rfc_slots(i);
-  operand_fetch_remaining_cycles.resize(bank_num, 0);
+  m_bank_num = init_param->bank_num;
+  m_core = init_param->core;
+  m_scheduler_id = init_param->scheduler_id;
+  m_rfc_set = new register_set(1, ("RFC_SET_" + std::to_string(init_param->scheduler_id)).c_str());
+  m_rfc_slots.resize(init_param->slot_num);
+  for (unsigned i = 0; i < init_param->slot_num; i++) init_rfc_slots(i);
+  operand_fetch_remaining_cycles.resize(init_param->bank_num, 0);
   operand_fetch_used_time = 0;
   expected_fetch_cycle = 0;
   this_rfc_use_reuse_time = 0;
-  m_is_compiler_ctrl_reuse = is_compiler_ctrl_reuse;
+  m_is_compiler_ctrl_reuse = init_param->is_compiler_ctrl_reuse;
+  m_sub_sm_bank_status = init_param->bank_status;
 }
 
 void register_file_cache_t::init_rfc_slots(unsigned slot_idx) {
@@ -1874,6 +1928,14 @@ void register_file_cache_t::init_rfc_slots(unsigned slot_idx) {
   m_rfc_slots[slot_idx].is_this_slot_enabled = false;
 }
 
+unsigned int register_file_cache_t::get_bank_idx(unsigned reg_idx){
+  assert(reg_idx > 0);
+  assert(m_is_busy);
+  unsigned warp_id = (*m_rfc_set->get_ready())->warp_id();
+  unsigned bank_id = (reg_idx + warp_id) % m_bank_num;
+  return bank_id;
+}
+
 void register_file_cache_t::cycle(int step_time) {
   if (m_is_busy){
     bool is_issue_ready = true;
@@ -1887,13 +1949,13 @@ void register_file_cache_t::cycle(int step_time) {
 
     if (!is_issue_ready){
       if (step_time == 0) operand_fetch_used_time++;
-      std::vector<bool> is_bank_read(m_bank_num, false);
+      // std::vector<bool> is_bank_read(m_bank_num, false);
       for (unsigned i = 0; i < m_rfc_slots.size(); i++){
         if (!m_rfc_slots[i].data_valid and m_rfc_slots[i].is_this_slot_enabled) {
-          unsigned bank_id = m_rfc_slots[i].reg_idx % m_bank_num;
-          if (!is_bank_read[bank_id]){
+          unsigned bank_id = get_bank_idx(m_rfc_slots[i].reg_idx);
+          if (!(*m_sub_sm_bank_status)[bank_id]){ // if the bank is not being accessed by other rfc, then read the bank
             if (!m_core->m_writeback_inst[m_scheduler_id][bank_id]->has_ready()){
-              is_bank_read[bank_id] = true;
+              (*m_sub_sm_bank_status)[bank_id] = true; // set the bank status to be accessed
               m_rfc_slots[i].data_valid = true;
               operand_fetch_remaining_cycles[bank_id]--;
             }
@@ -1920,7 +1982,7 @@ void register_file_cache_t::compute_inst_src_operands_cycle(warp_inst_t *inst) {
         abort();
       }
       src_operand_num++;
-      unsigned bank_id = inst->arch_reg.src[i] % m_bank_num;
+      unsigned bank_id = get_bank_idx(inst->arch_reg.src[i]);
       if (!is_src_operands_in_cache(inst->warp_id(), inst->arch_reg.src[i], i, false)) {
           m_rfc_slots[i].warp_idx = inst->warp_id();
           m_rfc_slots[i].reg_idx = inst->arch_reg.src[i];

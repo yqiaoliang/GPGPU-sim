@@ -638,11 +638,18 @@ class swl_scheduler : public scheduler_unit {
   unsigned m_num_warps_to_limit;
 };
 
-
+struct register_file_init_param_t{
+  unsigned scheduler_id;
+  unsigned bank_num;
+  unsigned slot_num;
+  bool is_compiler_ctrl_reuse;
+  shader_core_ctx *core;
+  std::vector<bool> *bank_status;
+};
 
 class register_file_cache_t{
 public:
-  register_file_cache_t(unsigned scheduler_id, unsigned bank_num, unsigned slot_num, bool is_compiler_ctrl_reuse, shader_core_ctx *core);
+  register_file_cache_t(register_file_init_param_t* init_param);
   ~register_file_cache_t();
   void cycle(int step_time);
   bool is_src_operands_in_cache(unsigned warp_idx, unsigned reg_idx, unsigned slot_idx, bool is_crossbar = false);
@@ -653,6 +660,7 @@ public:
   void set_busy(bool status) {m_is_busy = status;}
   void init_rfc_slots(unsigned slot_idx);
   void reset_rfc();
+  unsigned int get_bank_idx(unsigned reg_idx);
 
 
 
@@ -679,19 +687,29 @@ public:
   unsigned this_rfc_use_reuse_time;
   shader_core_ctx *m_core;
   bool m_is_compiler_ctrl_reuse;
+
+  std::vector<bool> *m_sub_sm_bank_status; // [bank_id]
 };
 
-
+struct operand_fetch_init_param_t{
+  unsigned scheduler_num;
+  unsigned bank_num;
+  unsigned rfc_num;
+  unsigned slot_num;
+  bool is_compiler_ctrl_reuse;
+  shader_core_ctx *core;
+};
 
 class operand_fetch_t{
 public:
   operand_fetch_t(){};
-  void init (unsigned scheduler_num, unsigned bank_num, unsigned rfc_num, unsigned slot_num, bool is_compiler_ctrl_reuse, shader_core_ctx *core);
+  void init (operand_fetch_init_param_t* init_param);
+  ~operand_fetch_t();
   void cycle(int step_time);
   // unsigned choose_which_rfc_to_issue(unsigned scheduler_id, warp_inst_t *inst);
   unsigned rfc_reuse_time(unsigned rfc_idx, warp_inst_t *inst);
   void add_ports(std::vector<register_set *> in_ports, std::vector<register_set *> out_ports);
-
+  void init_all_bank_status();
 
   struct in_out_port_t{
     std::vector<register_set *> in_ports;
@@ -706,6 +724,9 @@ private:
   std::vector<register_file_cache_t *> m_rfc_caches;
   shader_core_ctx *m_core;
   bool m_is_compiler_ctrl_reuse;
+
+  std::vector<std::vector<bool>> m_all_bank_status;
+  std::vector<unsigned> m_last_read_rfc_idx; // [scheduler_num]
 };
 
 
