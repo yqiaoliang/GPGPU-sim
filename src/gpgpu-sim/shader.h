@@ -644,7 +644,7 @@ class register_file_cache_t{
 public:
   register_file_cache_t(unsigned scheduler_id, unsigned bank_num, unsigned slot_num, bool is_compiler_ctrl_reuse, shader_core_ctx *core);
   ~register_file_cache_t();
-  void cycle();
+  void cycle(int step_time);
   bool is_src_operands_in_cache(unsigned warp_idx, unsigned reg_idx, unsigned slot_idx, bool is_crossbar = false);
   void compute_inst_src_operands_cycle(warp_inst_t *inst);
   void set_reuse(warp_inst_t *inst);
@@ -687,7 +687,7 @@ class operand_fetch_t{
 public:
   operand_fetch_t(){};
   void init (unsigned scheduler_num, unsigned bank_num, unsigned rfc_num, unsigned slot_num, bool is_compiler_ctrl_reuse, shader_core_ctx *core);
-  void cycle();
+  void cycle(int step_time);
   // unsigned choose_which_rfc_to_issue(unsigned scheduler_id, warp_inst_t *inst);
   unsigned rfc_reuse_time(unsigned rfc_idx, warp_inst_t *inst);
   void add_ports(std::vector<register_set *> in_ports, std::vector<register_set *> out_ports);
@@ -723,16 +723,12 @@ class opndcoll_rfu_t {  // operand collector based register file unit
   void add_port(port_vector_t &input, port_vector_t &ouput,
                 uint_vector_t cu_sets);
   void init(unsigned num_banks, shader_core_ctx *shader);
+  void record_stall(unsigned long long cur_cycle);
 
   // modifiers
   bool writeback(warp_inst_t &warp);
 
-  void step() {
-    dispatch_ready_cu();
-    allocate_reads();
-    for (unsigned p = 0; p < m_in_ports.size(); p++) allocate_cu(p);
-    process_banks();
-  }
+  void step(int step_time);
 
   void reset_banks() { process_banks(); }  // for RFC replacement: reset bank write allocations
 
@@ -1014,6 +1010,10 @@ class opndcoll_rfu_t {  // operand collector based register file unit
       m_not_ready.reset();
       m_warp_id = -1;
       m_num_banks = 0;
+
+      m_expected_ready_cycle = 0;
+      m_real_ready_cycle = -1;
+      m_allocated_cycle = 0;
     }
     // accessors
     bool ready() const;
@@ -1033,13 +1033,22 @@ class opndcoll_rfu_t {  // operand collector based register file unit
     void init(unsigned n, unsigned num_banks, const core_config *config,
               opndcoll_rfu_t *rfu, bool m_sub_core_model, unsigned reg_id,
               unsigned num_banks_per_sched);
-    bool allocate(register_set *pipeline_reg, register_set *output_reg);
+    bool allocate(register_set *pipeline_reg, register_set *output_reg, unsigned long long cur_cycle);
 
     void collect_operand(unsigned op) { m_not_ready.reset(op); }
     unsigned get_num_operands() const { return m_warp->get_num_operands(); }
     unsigned get_num_regs() const { return m_warp->get_num_regs(); }
     void dispatch(unsigned long long cycle);
     bool is_free() { return m_free; }
+    void record_stall(unsigned long long cur_cycle) {
+      if (!m_free && m_not_ready.none() and m_real_ready_cycle == -1) {
+        m_real_ready_cycle = cur_cycle - m_allocated_cycle;
+        printf("m_real_ready_cycle: %u, m_expected_ready_cycle: %u\n", m_real_ready_cycle,
+               m_expected_ready_cycle);
+        m_warp->m_stall_cycles[m_warp->m_cur_stage] =
+            m_real_ready_cycle - m_expected_ready_cycle;
+      }
+    }
 
    private:
     bool m_free;
@@ -1052,6 +1061,10 @@ class opndcoll_rfu_t {  // operand collector based register file unit
     std::bitset<MAX_REG_OPERANDS * 2> m_not_ready;
     unsigned m_num_banks;
     opndcoll_rfu_t *m_rfu;
+
+    unsigned int m_expected_ready_cycle;
+    unsigned int m_real_ready_cycle;
+    unsigned long long m_allocated_cycle;
 
     unsigned m_num_banks_per_sched;
     bool m_sub_core_model;
@@ -1445,7 +1458,6 @@ class ldst_unit : public pipelined_simd_unit {
   void flush();
   void invalidate();
   void writeback();
-
   // accessors
   virtual unsigned clock_multiplier() const;
 

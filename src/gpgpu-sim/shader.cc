@@ -1793,12 +1793,12 @@ void operand_fetch_t::add_ports(std::vector<register_set *> in_ports, std::vecto
   m_ports.out_ports = out_ports;
 }
 
-void operand_fetch_t::cycle() {
+void operand_fetch_t::cycle(int step_time) {
   for (unsigned i = 0; i < m_scheduler_num; i++){
     for (unsigned j = 0; j < m_rfc_num / m_scheduler_num; j++){
       unsigned rfc_id = m_scheduler_num * j + i;
-      if (m_rfc_caches[rfc_id]->is_busy()) m_rfc_caches[rfc_id]->cycle();
-      else {
+      if (m_rfc_caches[rfc_id]->is_busy()) m_rfc_caches[rfc_id]->cycle(step_time);
+      else if (step_time == 0){
         unsigned rr_port = -1; // round robin port
         unsigned choosen_port = -1;
         unsigned max_use_reuse_time = 0;
@@ -1874,7 +1874,7 @@ void register_file_cache_t::init_rfc_slots(unsigned slot_idx) {
   m_rfc_slots[slot_idx].is_this_slot_enabled = false;
 }
 
-void register_file_cache_t::cycle() {
+void register_file_cache_t::cycle(int step_time) {
   if (m_is_busy){
     bool is_issue_ready = true;
     for (int i = 0; i < operand_fetch_remaining_cycles.size(); i++){
@@ -1886,7 +1886,7 @@ void register_file_cache_t::cycle() {
 
 
     if (!is_issue_ready){
-      operand_fetch_used_time++;
+      if (step_time == 0) operand_fetch_used_time++;
       std::vector<bool> is_bank_read(m_bank_num, false);
       for (unsigned i = 0; i < m_rfc_slots.size(); i++){
         if (!m_rfc_slots[i].data_valid and m_rfc_slots[i].is_this_slot_enabled) {
@@ -1901,7 +1901,7 @@ void register_file_cache_t::cycle() {
         }
       }
     }
-    else issue_inst_to_next_stage();
+    else if (step_time == 0) issue_inst_to_next_stage();
     return;
   }
 }
@@ -1944,7 +1944,7 @@ void register_file_cache_t::compute_inst_src_operands_cycle(warp_inst_t *inst) {
     }
   }
 
-  expected_fetch_cycle = max_bank_read_num;
+  expected_fetch_cycle = max_bank_read_num >> 1; // each bank can be read once every 2 cycles
 }
 
 bool register_file_cache_t::is_src_operands_in_cache(unsigned warp_idx, unsigned reg_idx, unsigned slot_idx, bool is_crossbar) {
@@ -2033,13 +2033,19 @@ void register_file_cache_t::reset_rfc() {
 }
 
 void shader_core_ctx::read_operands() {
-  if (m_config->gpgpu_is_use_rfc) {
-    m_operand_fetch.cycle();
-    m_operand_collector.reset_banks(); 
-  }
-  else {
-    for (unsigned int i = 0; i < m_config->reg_file_port_throughput; ++i)
-    m_operand_collector.step();
+  // for (unsigned i = 0; i < )
+  //   if (m_config->gpgpu_is_use_rfc) {
+  //     m_operand_fetch.cycle();
+  //     m_operand_collector.reset_banks(); 
+  //   }
+  //   else m_operand_collector.step();
+
+  for (unsigned int i = 0; i < m_config->reg_file_port_throughput; i++){
+    if (m_config->gpgpu_is_use_rfc) {
+      m_operand_fetch.cycle(i);
+      m_operand_collector.reset_banks(); 
+    }
+    else m_operand_collector.step(i);
   }
 }
 
@@ -2365,6 +2371,8 @@ void shader_core_ctx::writeback() {
           temp_set->move_in(*preg);
           temp_set_vec.push_back(temp_set);
         }
+        // this assumes that there is only one dest register
+        break;
       }
     }
 
@@ -4833,7 +4841,7 @@ void opndcoll_rfu_t::allocate_cu(unsigned port_num) {
         for (unsigned k = cuLowerBound; k < cuUpperBound; k++) {
           if (cu_set[k].is_free()) {
             collector_unit_t *cu = &cu_set[k];
-            allocated = cu->allocate(inp.m_in[i], inp.m_out[i]);
+            allocated = cu->allocate(inp.m_in[i], inp.m_out[i], m_shader->get_gpu()->gpu_sim_cycle);
             m_arbiter.add_read_requests(cu);
             break;
           }
@@ -4921,14 +4929,20 @@ void opndcoll_rfu_t::collector_unit_t::init(unsigned n, unsigned num_banks,
   m_sub_core_model = sub_core_model;
   m_reg_id = reg_id;
   m_num_banks_per_sched = banks_per_sched;
+
+  m_expected_ready_cycle = 0;
+  m_real_ready_cycle = -1;
+  m_allocated_cycle = 0;
 }
 
 bool opndcoll_rfu_t::collector_unit_t::allocate(register_set *pipeline_reg_set,
-                                                register_set *output_reg_set) {
+                                                register_set *output_reg_set, unsigned long long cur_cycle) {
   assert(m_free);
   assert(m_not_ready.none());
   m_free = false;
   m_output_register = output_reg_set;
+  std::vector<unsigned int> bank_read_time(m_num_banks_per_sched, 0);
+
   warp_inst_t **pipeline_reg = pipeline_reg_set->get_ready();
   if ((pipeline_reg) and !((*pipeline_reg)->empty())) {
     m_warp_id = (*pipeline_reg)->warp_id();
@@ -4948,14 +4962,38 @@ bool opndcoll_rfu_t::collector_unit_t::allocate(register_set *pipeline_reg_set,
             op_t(this, op, reg_num, m_num_banks, m_sub_core_model,
                  m_num_banks_per_sched, (*pipeline_reg)->get_schd_id());
         m_not_ready.set(op);
+        unsigned bank_id = (reg_num + m_warp_id) % m_num_banks_per_sched;
+        bank_read_time[bank_id] += 1;
       } else
         m_src_op[op] = op_t();
     }
     // move_warp(m_warp,*pipeline_reg);
+    for (unsigned i = 0; i < bank_read_time.size(); i++){
+      m_expected_ready_cycle = std::max(m_expected_ready_cycle, bank_read_time[i]);
+    }
+    m_expected_ready_cycle >>= 1;
+    m_allocated_cycle = cur_cycle;
+    m_real_ready_cycle = -1;
     pipeline_reg_set->move_out_to(m_warp);
     return true;
   }
   return false;
+}
+
+void opndcoll_rfu_t::step(int step_time) {
+  if (step_time == 0) dispatch_ready_cu();
+  allocate_reads();
+  record_stall(m_shader->get_gpu()->gpu_sim_cycle);
+  if (step_time == 0) {
+    for (unsigned p = 0; p < m_in_ports.size(); p++) allocate_cu(p);
+  }
+  process_banks();
+}
+
+void opndcoll_rfu_t::record_stall(unsigned long long cur_cycle) {
+  for (unsigned i = 0; i < m_cu.size(); i++) {
+    m_cu[i]->record_stall(cur_cycle);
+  }
 }
 
 void opndcoll_rfu_t::collector_unit_t::dispatch(unsigned long long cur_cycle) {
@@ -4975,6 +5013,9 @@ void opndcoll_rfu_t::collector_unit_t::dispatch(unsigned long long cur_cycle) {
   m_free = true;
   m_output_register = NULL;
   for (unsigned i = 0; i < MAX_REG_OPERANDS * 2; i++) m_src_op[i].reset();
+  m_expected_ready_cycle = 0;
+  m_real_ready_cycle = -1;
+  m_allocated_cycle = 0;
 }
 
 void exec_simt_core_cluster::create_shader_core_ctx() {
