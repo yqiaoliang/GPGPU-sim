@@ -503,12 +503,17 @@ shader_core_ctx::shader_core_ctx(class gpgpu_sim *gpu,
   m_occupied_ctas = 0;
   m_occupied_hwtid.reset();
   m_occupied_cta_to_hwtid.clear();
-  m_writeback_inst.resize(m_config->gpgpu_num_sched_per_core);
+  // m_writeback_inst.resize(m_config->gpgpu_num_sched_per_core);
+  // for (int i = 0; i < m_config->gpgpu_num_sched_per_core; i++){
+  //   m_writeback_inst[i].resize(m_config->gpgpu_rfc_bank_num);
+  //   for (int j = 0; j < m_config->gpgpu_rfc_bank_num; j++){
+  //     m_writeback_inst[i][j] = new register_set(m_config->gpgpu_writeback_stack_deepth, ("RFC_SET_" + std::to_string(i) + "_" + std::to_string(j)).c_str());
+  //   }
+  // }
+
+  m_writeback_inst_valid.resize(m_config->gpgpu_num_sched_per_core);
   for (int i = 0; i < m_config->gpgpu_num_sched_per_core; i++){
-    m_writeback_inst[i].resize(m_config->gpgpu_rfc_bank_num);
-    for (int j = 0; j < m_config->gpgpu_rfc_bank_num; j++){
-      m_writeback_inst[i][j] = new register_set(m_config->gpgpu_writeback_stack_deepth, ("RFC_SET_" + std::to_string(i) + "_" + std::to_string(j)).c_str());
-    }
+    m_writeback_inst_valid[i].resize(m_config->gpgpu_rfc_bank_num);
   }
 
   unsigned rfc_num = config->gpgpu_num_sched_per_core * config->gpgpu_rfc_or_oc_per_scheduler_num;
@@ -520,6 +525,7 @@ shader_core_ctx::shader_core_ctx(class gpgpu_sim *gpu,
   fetch_param->rfc_num = rfc_num;
   fetch_param->slot_num = 4;
   fetch_param->is_compiler_ctrl_reuse = config->gpgpu_is_compiler_ctrl_reuse;
+  fetch_param->writeback_stack_deepth = config->gpgpu_writeback_stack_deepth;
   fetch_param->core = this;
 
   m_operand_fetch.init(fetch_param);
@@ -528,12 +534,12 @@ shader_core_ctx::shader_core_ctx(class gpgpu_sim *gpu,
 }
 
 shader_core_ctx::~shader_core_ctx() {
-    for (int i = 0; i < m_config->gpgpu_num_sched_per_core; i++){
-    m_writeback_inst[i].resize(m_config->gpgpu_rfc_bank_num);
-    for (int j = 0; j < m_config->gpgpu_rfc_bank_num; j++){
-      delete m_writeback_inst[i][j];
-    }
-  }
+  // for (int i = 0; i < m_config->gpgpu_num_sched_per_core; i++){
+  //   m_writeback_inst[i].resize(m_config->gpgpu_rfc_bank_num);
+  //   for (int j = 0; j < m_config->gpgpu_rfc_bank_num; j++){
+  //     delete m_writeback_inst[i][j];
+  //   }
+  // }
 }
 
 void shader_core_ctx::reinit(unsigned start_thread, unsigned end_thread,
@@ -1787,6 +1793,8 @@ void operand_fetch_t::init(operand_fetch_init_param_t* init_param) {
   m_rfc_num = init_param->rfc_num;
   m_is_compiler_ctrl_reuse = init_param->is_compiler_ctrl_reuse;
   m_core = init_param->core;
+  m_bank_num = init_param->bank_num;
+  m_writeback_stack_deepth = init_param->writeback_stack_deepth;
 
   if (m_rfc_num % m_scheduler_num != 0) {
     fprintf(stderr, "Error: m_rfc_num should be a multiple of m_scheduler_num (m_rfc_num = %u, m_scheduler_num = %u)\n", m_rfc_num, m_scheduler_num);
@@ -1839,8 +1847,21 @@ void operand_fetch_t::init_all_bank_status() {
   }
 }
 
+void operand_fetch_t::allocate_writeback(){
+  for (unsigned i = 0; i < m_scheduler_num; i++){
+    for (unsigned j = 0; j < m_bank_num; j++){
+      assert(m_core->m_writeback_inst_valid[i][j].size() <= m_writeback_stack_deepth);
+      if (!m_core->m_writeback_inst_valid[i][j].empty()){
+        m_core->m_writeback_inst_valid[i][j].pop();
+        m_all_bank_status[i][j] = true;
+      }
+    }
+  }
+}
+
 void operand_fetch_t::cycle(int step_time) {
   init_all_bank_status();
+  allocate_writeback();
 
   for (unsigned i = 0; i < m_scheduler_num; i++){
     unsigned m_rfc_per_scheduler = m_rfc_num / m_scheduler_num;
@@ -1954,11 +1975,14 @@ void register_file_cache_t::cycle(int step_time) {
         if (!m_rfc_slots[i].data_valid and m_rfc_slots[i].is_this_slot_enabled) {
           unsigned bank_id = get_bank_idx(m_rfc_slots[i].reg_idx);
           if (!(*m_sub_sm_bank_status)[bank_id]){ // if the bank is not being accessed by other rfc, then read the bank
-            if (!m_core->m_writeback_inst[m_scheduler_id][bank_id]->has_ready()){
-              (*m_sub_sm_bank_status)[bank_id] = true; // set the bank status to be accessed
-              m_rfc_slots[i].data_valid = true;
-              operand_fetch_remaining_cycles[bank_id]--;
-            }
+            // if (!m_core->m_writeback_inst[m_scheduler_id][bank_id]->has_ready()){
+            //   (*m_sub_sm_bank_status)[bank_id] = true; // set the bank status to be accessed
+            //   m_rfc_slots[i].data_valid = true;
+            //   operand_fetch_remaining_cycles[bank_id]--;
+            // }
+            (*m_sub_sm_bank_status)[bank_id] = true; // set the bank status to be accessed
+            m_rfc_slots[i].data_valid = true;
+            operand_fetch_remaining_cycles[bank_id]--;
           }
         }
       }
@@ -2422,12 +2446,33 @@ void shader_core_ctx::writeback() {
 
     for (int i = 0; i < MAX_REG_OPERANDS; i++){
       if (pipe_reg->arch_reg.dst[i] > 0){
-        unsigned int bank_idx = pipe_reg->arch_reg.dst[i] % m_config->gpgpu_rfc_bank_num;
+        unsigned int bank_idx = (pipe_reg->arch_reg.dst[i] + pipe_reg->warp_id()) % m_config->gpgpu_rfc_bank_num;
         unsigned scheduler_idx = pipe_reg->get_schd_id();
-        if (m_writeback_inst[scheduler_idx][bank_idx]->has_free()) {
-          m_writeback_inst[scheduler_idx][bank_idx]->move_in(*preg);
-        } 
-        else{
+        // if (m_writeback_inst[scheduler_idx][bank_idx]->has_free()) {
+        //   m_writeback_inst[scheduler_idx][bank_idx]->move_in(*preg);
+        // }
+        if (m_writeback_inst_valid[scheduler_idx][bank_idx].size() < m_config->gpgpu_writeback_stack_deepth) {
+          m_writeback_inst_valid[scheduler_idx][bank_idx].emplace(true);
+
+          unsigned long long cur_cycle = m_gpu->gpu_sim_cycle;
+          pipe_reg->m_remaining_cycles[pipe_reg->m_cur_stage] = cur_cycle - pipe_reg->m_cur_stage_cycles;
+          pipe_reg->m_cur_stage_cycles = cur_cycle;
+          pipe_reg->m_cur_stage++;
+          pipe_reg->m_writeback_cycles = cur_cycle;
+          pipe_reg->print_time_info();
+
+          unsigned warp_id = pipe_reg->warp_id();
+          m_scoreboard->releaseRegisters(pipe_reg);
+          m_warp[warp_id]->dec_inst_in_pipeline();
+          warp_inst_complete(*pipe_reg);
+          m_gpu->gpu_sim_insn_last_update_sid = m_sid;
+          m_gpu->gpu_sim_insn_last_update = m_gpu->gpu_sim_cycle;
+          m_last_inst_gpu_sim_cycle = m_gpu->gpu_sim_cycle;
+          m_last_inst_gpu_tot_sim_cycle = m_gpu->gpu_tot_sim_cycle;
+          pipe_reg->clear();
+
+        }
+        else {
           (*preg)->m_stall_cycles[pipe_reg->m_cur_stage] += 1;
           register_set *temp_set = new register_set(1, "TEMP_SET");
           temp_set->move_in(*preg);
@@ -2441,32 +2486,32 @@ void shader_core_ctx::writeback() {
     preg = m_pipeline_reg[EX_WB].get_ready();
     pipe_reg = (preg == NULL) ? NULL : *preg;
   }
-  if (m_config->gpgpu_is_use_rfc) {
-    for (unsigned int i = 0; i < m_config->gpgpu_num_sched_per_core; i++){
-      for (unsigned int j = 0; j < m_config->gpgpu_rfc_bank_num; j++){
-        if (m_writeback_inst[i][j]->has_ready()) {
-          warp_inst_t *inst = *m_writeback_inst[i][j]->get_ready();
+  // if (m_config->gpgpu_is_use_rfc) {
+  //   for (unsigned int i = 0; i < m_config->gpgpu_num_sched_per_core; i++){
+  //     for (unsigned int j = 0; j < m_config->gpgpu_rfc_bank_num; j++){
+  //       if (m_writeback_inst[i][j]->has_ready()) {
+  //         warp_inst_t *inst = *m_writeback_inst[i][j]->get_ready();
 
-          unsigned long long cur_cycle = m_gpu->gpu_sim_cycle;
-          inst->m_remaining_cycles[inst->m_cur_stage] = cur_cycle - inst->m_cur_stage_cycles;
-          inst->m_cur_stage_cycles = m_gpu->gpu_sim_cycle;
-          inst->m_cur_stage++;
-          inst->m_writeback_cycles = m_gpu->gpu_sim_cycle;
-          inst->print_time_info();
+  //         unsigned long long cur_cycle = m_gpu->gpu_sim_cycle;
+  //         inst->m_remaining_cycles[inst->m_cur_stage] = cur_cycle - inst->m_cur_stage_cycles;
+  //         inst->m_cur_stage_cycles = m_gpu->gpu_sim_cycle;
+  //         inst->m_cur_stage++;
+  //         inst->m_writeback_cycles = m_gpu->gpu_sim_cycle;
+  //         inst->print_time_info();
 
-          unsigned warp_id = inst->warp_id();
-          m_scoreboard->releaseRegisters(inst);
-          m_warp[warp_id]->dec_inst_in_pipeline();
-          warp_inst_complete(*inst);
-          m_gpu->gpu_sim_insn_last_update_sid = m_sid;
-          m_gpu->gpu_sim_insn_last_update = m_gpu->gpu_sim_cycle;
-          m_last_inst_gpu_sim_cycle = m_gpu->gpu_sim_cycle;
-          m_last_inst_gpu_tot_sim_cycle = m_gpu->gpu_tot_sim_cycle;
-          inst->clear();
-        }
-      }
-    }
-  }
+  //         unsigned warp_id = inst->warp_id();
+  //         m_scoreboard->releaseRegisters(inst);
+  //         m_warp[warp_id]->dec_inst_in_pipeline();
+  //         warp_inst_complete(*inst);
+  //         m_gpu->gpu_sim_insn_last_update_sid = m_sid;
+  //         m_gpu->gpu_sim_insn_last_update = m_gpu->gpu_sim_cycle;
+  //         m_last_inst_gpu_sim_cycle = m_gpu->gpu_sim_cycle;
+  //         m_last_inst_gpu_tot_sim_cycle = m_gpu->gpu_tot_sim_cycle;
+  //         inst->clear();
+  //       }
+  //     }
+  //   }
+  // }
 
   while(!temp_set_vec.empty()){
     register_set *temp_set = temp_set_vec.back();

@@ -46,6 +46,7 @@
 #include <utility>
 #include <vector>
 #include <unordered_set> 
+#include <stack>
 
 // #include "../cuda-sim/ptx.tab.h"
 
@@ -696,6 +697,7 @@ struct operand_fetch_init_param_t{
   unsigned bank_num;
   unsigned rfc_num;
   unsigned slot_num;
+  unsigned writeback_stack_deepth;
   bool is_compiler_ctrl_reuse;
   shader_core_ctx *core;
 };
@@ -710,6 +712,7 @@ public:
   unsigned rfc_reuse_time(unsigned rfc_idx, warp_inst_t *inst);
   void add_ports(std::vector<register_set *> in_ports, std::vector<register_set *> out_ports);
   void init_all_bank_status();
+  void allocate_writeback();
 
   struct in_out_port_t{
     std::vector<register_set *> in_ports;
@@ -724,6 +727,9 @@ private:
   std::vector<register_file_cache_t *> m_rfc_caches;
   shader_core_ctx *m_core;
   bool m_is_compiler_ctrl_reuse;
+
+  unsigned m_bank_num;
+  unsigned m_writeback_stack_deepth;
 
   std::vector<std::vector<bool>> m_all_bank_status;
   std::vector<unsigned> m_last_read_rfc_idx; // [scheduler_num]
@@ -2539,7 +2545,8 @@ class shader_core_ctx : public core_t {
   bool check_if_non_released_reduction_barrier(warp_inst_t &inst);
 
   // used for rfc, to sim truth register file access latency, the form is vector[scheduler_id][bank_id]
-  std::vector<std::vector<register_set*>> m_writeback_inst;
+  // std::vector<std::vector<register_set*>> m_writeback_inst;
+  std::vector<std::vector<std::stack<bool>>> m_writeback_inst_valid; // [scheduler_id][bank_id][inst_slot], inst_slot num <= m_config->gpgpu_writeback_stack_deepth;
 
  protected:
   unsigned inactive_lanes_accesses_sfu(unsigned active_count, double latency) {
