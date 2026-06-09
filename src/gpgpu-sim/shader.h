@@ -1246,7 +1246,8 @@ class simd_function_unit {
   // accessors
   virtual unsigned clock_multiplier() const { return 1; }
   virtual bool can_issue(const warp_inst_t &inst) const {
-    return m_dispatch_reg->empty() && !occupied.test(inst.latency);
+    if (m_config->gpgpu_is_use_rfc) return m_dispatch_reg->empty();
+    else return m_dispatch_reg->empty() && !occupied.test(inst.latency);
   }
   virtual bool is_issue_partitioned() = 0;
   virtual unsigned get_issue_reg_id() = 0;

@@ -1088,6 +1088,7 @@ void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
                                  const warp_inst_t *next_inst,
                                  const active_mask_t &active_mask,
                                  unsigned warp_id, unsigned sch_id) {
+  assert(pipe_reg_set.has_free(m_config->sub_core_model, sch_id));
   warp_inst_t **pipe_reg =
       pipe_reg_set.get_free(m_config->sub_core_model, sch_id);
   assert(pipe_reg);
@@ -1867,10 +1868,11 @@ void operand_fetch_t::cycle(int step_time) {
     unsigned m_rfc_per_scheduler = m_rfc_num / m_scheduler_num;
     unsigned start_idx = m_last_read_rfc_idx[i];
     for (unsigned j = 0; j < m_rfc_per_scheduler; j++){
-      unsigned rfc_id = m_scheduler_num * (j + start_idx) + i;
+      unsigned rfc_offset = (j + start_idx) % m_rfc_per_scheduler;
+      unsigned rfc_id = m_scheduler_num * rfc_offset + i;
       if (m_rfc_caches[rfc_id]->is_busy()) {
         m_rfc_caches[rfc_id]->cycle(step_time);
-        m_last_read_rfc_idx[i] = (j + start_idx) % m_rfc_per_scheduler;
+        m_last_read_rfc_idx[i] = rfc_offset;
       }
       else if (step_time == 0){
         unsigned rr_port = -1; // round robin port
@@ -1893,6 +1895,7 @@ void operand_fetch_t::cycle(int step_time) {
         if (max_use_reuse_time > 0) choosen_port = choosen_port;
         else choosen_port = rr_port;
 
+        assert(m_rfc_caches[rfc_id]->m_rfc_set->has_free());
         warp_inst_t ** cur_scheduler_rfc_port = m_rfc_caches[rfc_id]->m_rfc_set->get_free(); // only one register set
         m_ports.in_ports[choosen_port]->move_out_to(true, i, *cur_scheduler_rfc_port);
 
@@ -2081,7 +2084,7 @@ void register_file_cache_t::issue_inst_to_next_stage() {
     warp_inst_t *issued_inst = *m_rfc_set->get_ready();
     unsigned long long cur_inst_remaining_cycles = m_core->get_gpu()->gpu_sim_cycle - issued_inst->m_cur_stage_cycles;
     issued_inst->m_remaining_cycles[issued_inst->m_cur_stage] = cur_inst_remaining_cycles;
-    issued_inst->m_stall_cycles[issued_inst->m_cur_stage] = operand_fetch_used_time - expected_fetch_cycle;
+    issued_inst->m_stall_cycles[issued_inst->m_cur_stage] += operand_fetch_used_time - expected_fetch_cycle;
     issued_inst->m_cur_stage_cycles = m_core->get_gpu()->gpu_sim_cycle;
     issued_inst->m_cur_stage++;
 
@@ -2475,6 +2478,7 @@ void shader_core_ctx::writeback() {
         else {
           (*preg)->m_stall_cycles[pipe_reg->m_cur_stage] += 1;
           register_set *temp_set = new register_set(1, "TEMP_SET");
+          assert(temp_set->has_free());
           temp_set->move_in(*preg);
           temp_set_vec.push_back(temp_set);
         }
@@ -2520,6 +2524,7 @@ void shader_core_ctx::writeback() {
       fprintf(stderr, "Error: no free slot in writeback pipeline register to hold the instruction in temp set when there is a bank conflict in writeback stage (writeback_pipeline_register_size = %u)\n", m_config->pipe_widths[EX_WB]);
       abort();
     }
+    assert(m_pipeline_reg[EX_WB].has_free());
     m_pipeline_reg[EX_WB].move_in(*temp_set->get_ready());
   }
 
@@ -3104,31 +3109,85 @@ pipelined_simd_unit::pipelined_simd_unit(register_set *result_port,
   active_insts_in_pipeline = 0;
 }
 
+// void pipelined_simd_unit::cycle() {
+//   if (!m_pipeline_reg[0]->empty()) {
+//     warp_inst_t *inst = m_pipeline_reg[0];
+//     if (inst->m_cur_stage != INST_STAGE_EXECUTION_PIPELINE) {
+//       printf(
+//           "Error: Instruction %u in warp %u is in stage %u, expected to be in "
+//           "execution pipeline stage.\n",
+//           inst->get_uid(), inst->warp_id(), inst->m_cur_stage);
+//       assert(0);
+//     }
+//     unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
+//     unsigned int wb_stage = static_cast<unsigned int>(INST_STAGE_WRITEBACK);
+//     // the writeback stall time has been included in this, so we need to subtract it, only not use rfc has useful
+//     inst->m_remaining_cycles[inst->m_cur_stage] = cur_cycle - inst->m_cur_stage_cycles - inst->m_stall_cycles[wb_stage];
+//     inst->m_cur_stage++;
+//     inst->m_cur_stage_cycles = cur_cycle;
+    
+//     assert(m_result_port->has_free());
+//     m_result_port->move_in(m_pipeline_reg[0]);
+//     assert(active_insts_in_pipeline > 0);
+//     active_insts_in_pipeline--;
+//   }
+//   if (active_insts_in_pipeline) {
+//     for (unsigned stage = 0; (stage + 1) < m_pipeline_depth; stage++)
+//       move_warp(m_pipeline_reg[stage], m_pipeline_reg[stage + 1]);
+//   }
+//   if (!m_dispatch_reg->empty()) {
+//     if (!m_dispatch_reg->dispatch_delay()) {
+//       int start_stage =
+//           m_dispatch_reg->latency - m_dispatch_reg->initiation_interval;
+//       if (m_pipeline_reg[start_stage]->empty()) {
+//         move_warp(m_pipeline_reg[start_stage], m_dispatch_reg);
+//         active_insts_in_pipeline++;
+//       }
+//     }
+//   }
+//   occupied >>= 1;
+// }
+
 void pipelined_simd_unit::cycle() {
   if (!m_pipeline_reg[0]->empty()) {
     warp_inst_t *inst = m_pipeline_reg[0];
+
     if (inst->m_cur_stage != INST_STAGE_EXECUTION_PIPELINE) {
       printf(
-          "Error: Instruction %u in warp %u is in stage %u, expected to be in "
-          "execution pipeline stage.\n",
-          inst->get_uid(), inst->warp_id(), inst->m_cur_stage);
+        "Error: Instruction %u in warp %u is in stage %u, expected to be in "
+        "execution pipeline stage.\n",
+        inst->get_uid(), inst->warp_id(), inst->m_cur_stage);
       assert(0);
     }
-    unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
-    unsigned int wb_stage = static_cast<unsigned int>(INST_STAGE_WRITEBACK);
-    // the writeback stall time has been included in this, so we need to subtract it, only not use rfc has useful
-    inst->m_remaining_cycles[inst->m_cur_stage] = cur_cycle - inst->m_cur_stage_cycles - inst->m_stall_cycles[wb_stage];
-    inst->m_cur_stage++;
-    inst->m_cur_stage_cycles = cur_cycle;
-    
-    m_result_port->move_in(m_pipeline_reg[0]);
-    assert(active_insts_in_pipeline > 0);
-    active_insts_in_pipeline--;
+
+    if (m_result_port->has_free()) {
+      unsigned long long cur_cycle = m_core->get_gpu()->gpu_sim_cycle;
+      unsigned int wb_stage = static_cast<unsigned int>(INST_STAGE_WRITEBACK);
+
+      inst->m_remaining_cycles[inst->m_cur_stage] =
+          cur_cycle - inst->m_cur_stage_cycles - inst->m_stall_cycles[wb_stage];
+      inst->m_cur_stage++;
+      inst->m_cur_stage_cycles = cur_cycle;
+
+      m_result_port->move_in(m_pipeline_reg[0]);
+      assert(active_insts_in_pipeline > 0);
+      active_insts_in_pipeline--;
+    }
+    else {
+      unsigned int wb_stage = static_cast<unsigned int>(INST_STAGE_WRITEBACK);
+      inst->m_stall_cycles[wb_stage]++;
+    }
   }
+
   if (active_insts_in_pipeline) {
-    for (unsigned stage = 0; (stage + 1) < m_pipeline_depth; stage++)
-      move_warp(m_pipeline_reg[stage], m_pipeline_reg[stage + 1]);
+    for (unsigned stage = 0; (stage + 1) < m_pipeline_depth; stage++) {
+      if (m_pipeline_reg[stage]->empty() &&
+          !m_pipeline_reg[stage + 1]->empty()) {
+        move_warp(m_pipeline_reg[stage], m_pipeline_reg[stage + 1]);
+      }
+    }
   }
+
   if (!m_dispatch_reg->empty()) {
     if (!m_dispatch_reg->dispatch_delay()) {
       int start_stage =

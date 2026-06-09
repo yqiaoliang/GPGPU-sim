@@ -72,4 +72,5 @@ setup
 __pycache__/
 
 # config
-configs/tested-cfgs/temp/
+configs/tested-cfgs/temp*
+
