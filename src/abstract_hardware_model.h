@@ -216,6 +216,13 @@ enum warp_inst_stage_t{
   NUM_WARP_INST_STAGE
 };
 
+enum warp_inst_operand_collector_stall_t{
+  INST_OC_STALL_RFC_CONFLICT = 0,
+  INST_OC_STALL_BANK_CONFLICT,
+  INST_OC_STALL_EXEC_UNIT_CONFLICT,
+  NUM_INST_OC_STAGE,
+};
+
 inline warp_inst_stage_t& operator++(warp_inst_stage_t& s) {
   s = static_cast<warp_inst_stage_t>(s + 1);
   return s;
@@ -1105,6 +1112,7 @@ class warp_inst_t : public inst_t {
 
     m_stall_cycles.resize(NUM_WARP_INST_STAGE, 0);
     m_remaining_cycles.resize(NUM_WARP_INST_STAGE, 0);
+    m_oc_stall_cycles.resize(NUM_INST_OC_STAGE, 0);
 
     m_cur_stage = INST_STAGE_NONE;
     m_cur_stage_cycles = 0;
@@ -1135,6 +1143,7 @@ class warp_inst_t : public inst_t {
 
     m_stall_cycles.resize(NUM_WARP_INST_STAGE, 0);
     m_remaining_cycles.resize(NUM_WARP_INST_STAGE, 0);
+    m_oc_stall_cycles.resize(NUM_INST_OC_STAGE, 0);
 
     m_cur_stage = INST_STAGE_NONE;
     m_cur_stage_cycles = 0;
@@ -1155,6 +1164,12 @@ class warp_inst_t : public inst_t {
     "OPERAND_COLLECTOR",
     "EXECUTION_PIPELINE",
     "WRITEBACK"
+  };
+
+  static inline constexpr const char* warp_inst_oc_stall_type_name[NUM_INST_OC_STAGE] = {
+    "RFC_NUM_CONFLICT",
+    "BANK_CONFLICT",
+    "EXEC_NUM_CONFLICT"
   };
 
   static inline std::unordered_map<int, std::string> warp_inst_op_type_name = {
@@ -1192,6 +1207,7 @@ class warp_inst_t : public inst_t {
   unsigned long long m_writeback_cycles;
   std::vector<unsigned long long> m_stall_cycles;
   std::vector<unsigned long long> m_remaining_cycles;
+  std::vector<unsigned long long> m_oc_stall_cycles;  // operand collector stall cycles for different reasons
 
   void print_time_info(){
     static FILE* stage_log = NULL;
@@ -1218,6 +1234,11 @@ class warp_inst_t : public inst_t {
               warp_inst_stage_name[s],
               m_stall_cycles[s], m_remaining_cycles[s]);
     }
+    for (unsigned s = 0; s < NUM_INST_OC_STAGE; s++) {
+      fprintf(stage_log, "    %-20s: oc_stall=%4llu\n",
+              warp_inst_oc_stall_type_name[s],
+              m_oc_stall_cycles[s]);
+    }
 
     if (stage_log != stdout && stage_log != stderr) {
       fflush(stage_log);
@@ -1236,6 +1257,7 @@ class warp_inst_t : public inst_t {
     m_writeback_cycles = 0;
     fill(m_stall_cycles.begin(), m_stall_cycles.end(), 0);
     fill(m_remaining_cycles.begin(), m_remaining_cycles.end(), 0);
+    fill(m_oc_stall_cycles.begin(), m_oc_stall_cycles.end(), 0);
   }
 
   void issue(const active_mask_t &mask, unsigned warp_id,

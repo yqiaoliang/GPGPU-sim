@@ -646,6 +646,7 @@ struct register_file_init_param_t{
   bool is_compiler_ctrl_reuse;
   shader_core_ctx *core;
   std::vector<bool> *bank_status;
+  std::vector<int> *cur_cycle_bank_read_time;
 };
 
 class register_file_cache_t{
@@ -690,6 +691,7 @@ public:
   bool m_is_compiler_ctrl_reuse;
 
   std::vector<bool> *m_sub_sm_bank_status; // [bank_id]
+  std::vector<int> *m_sub_sm_cur_cycle_bank_read_time; // [bank_id]
 };
 
 struct operand_fetch_init_param_t{
@@ -711,7 +713,7 @@ public:
   // unsigned choose_which_rfc_to_issue(unsigned scheduler_id, warp_inst_t *inst);
   unsigned rfc_reuse_time(unsigned rfc_idx, warp_inst_t *inst);
   void add_ports(std::vector<register_set *> in_ports, std::vector<register_set *> out_ports);
-  void init_all_bank_status();
+  void init_all_bank_status(int step_time);
   void allocate_writeback();
 
   struct in_out_port_t{
@@ -732,6 +734,7 @@ private:
   unsigned m_writeback_stack_deepth;
 
   std::vector<std::vector<bool>> m_all_bank_status;
+  std::vector<std::vector<int>> m_cur_cycle_bank_read_time;
   std::vector<unsigned> m_last_read_rfc_idx; // [scheduler_num]
 };
 
@@ -1245,10 +1248,7 @@ class simd_function_unit {
 
   // accessors
   virtual unsigned clock_multiplier() const { return 1; }
-  virtual bool can_issue(const warp_inst_t &inst) const {
-    if (m_config->gpgpu_is_use_rfc) return m_dispatch_reg->empty();
-    else return m_dispatch_reg->empty() && !occupied.test(inst.latency);
-  }
+  virtual bool can_issue(const warp_inst_t &inst) const;
   virtual bool is_issue_partitioned() = 0;
   virtual unsigned get_issue_reg_id() = 0;
   virtual bool stallable() const = 0;

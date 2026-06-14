@@ -416,8 +416,9 @@ void shader_core_ctx::create_exec_pipeline() {
     m_issue_port.push_back(OC_EX_SP);
   }
 
+  assert(m_config->gpgpu_num_dp_units % m_config->gpgpu_num_sched_per_core == 0);
   for (unsigned k = 0; k < m_config->gpgpu_num_dp_units; k++) {
-    m_fu.push_back(new dp_unit(&m_pipeline_reg[EX_WB], m_config, this, k));
+    m_fu.push_back(new dp_unit(&m_pipeline_reg[EX_WB], m_config, this, k % m_config->gpgpu_num_sched_per_core));
     m_dispatch_port.push_back(ID_OC_DP);
     m_issue_port.push_back(OC_EX_DP);
   }
@@ -1805,9 +1806,7 @@ void operand_fetch_t::init(operand_fetch_init_param_t* init_param) {
   for (unsigned i = 0; i < m_scheduler_num; i++){
     m_last_read_rfc_idx.push_back(0);
     m_all_bank_status.push_back(std::vector<bool>(init_param->bank_num, false));
-    for (unsigned j = 0; j < init_param->bank_num; j++){
-      m_all_bank_status[i][j] = false;
-    }
+    m_cur_cycle_bank_read_time.push_back(std::vector<int>(init_param->bank_num, 0));
   }
 
   for (unsigned i = 0; i < m_rfc_num; i++){
@@ -1820,6 +1819,7 @@ void operand_fetch_t::init(operand_fetch_init_param_t* init_param) {
     rfc_init_param->is_compiler_ctrl_reuse = init_param->is_compiler_ctrl_reuse;
     rfc_init_param->core = init_param->core;
     rfc_init_param->bank_status = &m_all_bank_status[i % m_scheduler_num];
+    rfc_init_param->cur_cycle_bank_read_time = &m_cur_cycle_bank_read_time[i % m_scheduler_num];
 
     m_rfc_caches.push_back(new register_file_cache_t(rfc_init_param));
 
@@ -1840,10 +1840,11 @@ void operand_fetch_t::add_ports(std::vector<register_set *> in_ports, std::vecto
   m_ports.out_ports = out_ports;
 }
 
-void operand_fetch_t::init_all_bank_status() {
+void operand_fetch_t::init_all_bank_status(int step_time) {
   for (unsigned i = 0; i < m_scheduler_num; i++){
     for (unsigned j = 0; j < m_all_bank_status[i].size(); j++){
       m_all_bank_status[i][j] = false;
+      if (step_time == 0) m_cur_cycle_bank_read_time[i][j] = 0;
     }
   }
 }
@@ -1855,13 +1856,14 @@ void operand_fetch_t::allocate_writeback(){
       if (!m_core->m_writeback_inst_valid[i][j].empty()){
         m_core->m_writeback_inst_valid[i][j].pop();
         m_all_bank_status[i][j] = true;
+        m_cur_cycle_bank_read_time[i][j] += 1;
       }
     }
   }
 }
 
 void operand_fetch_t::cycle(int step_time) {
-  init_all_bank_status();
+  init_all_bank_status(step_time);
   allocate_writeback();
 
   for (unsigned i = 0; i < m_scheduler_num; i++){
@@ -1899,9 +1901,18 @@ void operand_fetch_t::cycle(int step_time) {
         warp_inst_t ** cur_scheduler_rfc_port = m_rfc_caches[rfc_id]->m_rfc_set->get_free(); // only one register set
         m_ports.in_ports[choosen_port]->move_out_to(true, i, *cur_scheduler_rfc_port);
 
+        unsigned long long cur_time = m_core->get_gpu()->gpu_sim_cycle;
+        unsigned int cur_oc_stall_stage = static_cast<unsigned int>(INST_OC_STALL_RFC_CONFLICT);
+        if (cur_time < (*cur_scheduler_rfc_port)->m_cur_stage_cycles + 1) {
+          fprintf(stderr, "Error: cur_time is smaller than cur_stage_cycles when issuing to rfc (cur_time = %llu, cur_stage_cycles = %llu)\n", cur_time, (*cur_scheduler_rfc_port)->m_cur_stage_cycles);
+          abort();
+        }
+        (*cur_scheduler_rfc_port)->m_oc_stall_cycles[cur_oc_stall_stage] = cur_time - (*cur_scheduler_rfc_port)->m_cur_stage_cycles - 1;
+
         m_rfc_caches[rfc_id]->set_busy(true);
         m_rfc_caches[rfc_id]->compute_inst_src_operands_cycle(*cur_scheduler_rfc_port);
         m_rfc_caches[rfc_id]->m_out_port_set = m_ports.out_ports[choosen_port];
+
         if ((*cur_scheduler_rfc_port)->m_cur_stage != INST_STAGE_OPERAND_COLLECTOR) {
            fprintf(stderr, "Error: the current stage of the instruction in rfc is not operand collector stage when it is issued to rfc (cur_stage = %u)\n", (*cur_scheduler_rfc_port)-> m_cur_stage);
            abort();
@@ -1937,6 +1948,7 @@ register_file_cache_t::register_file_cache_t(register_file_init_param_t* init_pa
   this_rfc_use_reuse_time = 0;
   m_is_compiler_ctrl_reuse = init_param->is_compiler_ctrl_reuse;
   m_sub_sm_bank_status = init_param->bank_status;
+  m_sub_sm_cur_cycle_bank_read_time = init_param->cur_cycle_bank_read_time;
 }
 
 void register_file_cache_t::init_rfc_slots(unsigned slot_idx) {
@@ -1978,14 +1990,15 @@ void register_file_cache_t::cycle(int step_time) {
         if (!m_rfc_slots[i].data_valid and m_rfc_slots[i].is_this_slot_enabled) {
           unsigned bank_id = get_bank_idx(m_rfc_slots[i].reg_idx);
           if (!(*m_sub_sm_bank_status)[bank_id]){ // if the bank is not being accessed by other rfc, then read the bank
-            // if (!m_core->m_writeback_inst[m_scheduler_id][bank_id]->has_ready()){
-            //   (*m_sub_sm_bank_status)[bank_id] = true; // set the bank status to be accessed
-            //   m_rfc_slots[i].data_valid = true;
-            //   operand_fetch_remaining_cycles[bank_id]--;
-            // }
             (*m_sub_sm_bank_status)[bank_id] = true; // set the bank status to be accessed
+            (*m_sub_sm_cur_cycle_bank_read_time)[bank_id] += 1; // increase the read time of this bank in this cycle
             m_rfc_slots[i].data_valid = true;
             operand_fetch_remaining_cycles[bank_id]--;
+          }
+          else if ((*m_sub_sm_cur_cycle_bank_read_time)[bank_id] == 2){
+            warp_inst_t *ready_inst = *m_rfc_set->get_ready();
+            unsigned cur_oc_stall_stage = static_cast<unsigned int>(INST_OC_STALL_BANK_CONFLICT);
+            ready_inst->m_oc_stall_cycles[cur_oc_stall_stage] += 1;
           }
         }
       }
@@ -2001,6 +2014,7 @@ register_file_cache_t::~register_file_cache_t() {
 
 void register_file_cache_t::compute_inst_src_operands_cycle(warp_inst_t *inst) {
   unsigned src_operand_num = 0;
+  std::unordered_set<unsigned> accessed_registers;
 
   for (unsigned i = 0; i < MAX_REG_OPERANDS; i++){
     if (inst->arch_reg.src[i] > 0){
@@ -2009,6 +2023,8 @@ void register_file_cache_t::compute_inst_src_operands_cycle(warp_inst_t *inst) {
         abort();
       }
       src_operand_num++;
+       // if the source register has been accessed by previous source operand, skip it to avoid counting the bank access multiple times
+      if (accessed_registers.find(inst->arch_reg.src[i]) != accessed_registers.end()) continue;
       unsigned bank_id = get_bank_idx(inst->arch_reg.src[i]);
       if (!is_src_operands_in_cache(inst->warp_id(), inst->arch_reg.src[i], i, false)) {
           m_rfc_slots[i].warp_idx = inst->warp_id();
@@ -2017,6 +2033,7 @@ void register_file_cache_t::compute_inst_src_operands_cycle(warp_inst_t *inst) {
           m_rfc_slots[i].is_reuse = false;
           m_rfc_slots[i].is_this_slot_enabled = true;
           operand_fetch_remaining_cycles[bank_id]++;
+          accessed_registers.insert(inst->arch_reg.src[i]);
       }
     }
   }
@@ -2100,6 +2117,9 @@ void register_file_cache_t::issue_inst_to_next_stage() {
   else {
     warp_inst_t *cur_inst = *m_rfc_set->get_ready();
     cur_inst->m_stall_cycles[cur_inst->m_cur_stage] += 1;
+
+    unsigned cur_oc_stall_stage = static_cast<unsigned int>(INST_OC_STALL_EXEC_UNIT_CONFLICT);
+    cur_inst->m_oc_stall_cycles[cur_oc_stall_stage] += 1;
   }
 }
 
@@ -2919,6 +2939,11 @@ simd_function_unit::simd_function_unit(const shader_core_config *config) {
   m_config = config;
   m_dispatch_reg = new warp_inst_t(config);
 }
+
+bool simd_function_unit::can_issue(const warp_inst_t &inst) const {
+    if (m_config->gpgpu_is_use_rfc) return m_dispatch_reg->empty();
+    else return m_dispatch_reg->empty() && !occupied.test(inst.latency);
+  }
 
 void simd_function_unit::issue(register_set &source_reg) {
   bool partition_issue =
