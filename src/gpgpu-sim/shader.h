@@ -671,6 +671,7 @@ public:
     unsigned reg_idx;
     bool data_valid;
     bool is_reuse;
+    bool is_compiler_reuse;
     bool is_this_slot_enabled;
   };
 
@@ -686,7 +687,9 @@ public:
   unsigned operand_fetch_used_time;
   unsigned expected_fetch_cycle;
   std::vector<int> operand_fetch_remaining_cycles;
-  unsigned this_rfc_use_reuse_time;
+  unsigned this_rfc_reuse_time;
+  unsigned this_rfc_compiler_reuse_time;
+  unsigned this_rfc_compiler_reuse_hit_time;
   shader_core_ctx *m_core;
   bool m_is_compiler_ctrl_reuse;
 
@@ -715,6 +718,7 @@ public:
   void add_ports(std::vector<register_set *> in_ports, std::vector<register_set *> out_ports);
   void init_all_bank_status(int step_time);
   void allocate_writeback();
+  register_file_cache_t* get_rfc_cache(unsigned rfc_idx) {return m_rfc_caches[rfc_idx];}
 
   struct in_out_port_t{
     std::vector<register_set *> in_ports;
@@ -2545,6 +2549,8 @@ class shader_core_ctx : public core_t {
   }
   bool check_if_non_released_reduction_barrier(warp_inst_t &inst);
 
+  operand_fetch_t *get_operand_fetch() { return &m_operand_fetch; }
+
   // used for rfc, to sim truth register file access latency, the form is vector[scheduler_id][bank_id]
   // std::vector<std::vector<register_set*>> m_writeback_inst;
   std::vector<std::vector<std::stack<bool>>> m_writeback_inst_valid; // [scheduler_id][bank_id][inst_slot], inst_slot num <= m_config->gpgpu_writeback_stack_deepth;
@@ -2775,6 +2781,7 @@ class simt_core_cluster {
   void display_pipeline(unsigned sid, FILE *fout, int print_mem, int mask);
   void print_cache_stats(FILE *fp, unsigned &dl1_accesses,
                          unsigned &dl1_misses) const;
+  std::vector<unsigned> get_rfc_compiler_reuse_status() const;
 
   void get_cache_stats(cache_stats &cs) const;
   void get_L1I_sub_stats(struct cache_sub_stats &css) const;

@@ -1945,7 +1945,9 @@ register_file_cache_t::register_file_cache_t(register_file_init_param_t* init_pa
   operand_fetch_remaining_cycles.resize(init_param->bank_num, 0);
   operand_fetch_used_time = 0;
   expected_fetch_cycle = 0;
-  this_rfc_use_reuse_time = 0;
+  this_rfc_reuse_time = 0;
+  this_rfc_compiler_reuse_time = 0;
+  this_rfc_compiler_reuse_hit_time = 0;
   m_is_compiler_ctrl_reuse = init_param->is_compiler_ctrl_reuse;
   m_sub_sm_bank_status = init_param->bank_status;
   m_sub_sm_cur_cycle_bank_read_time = init_param->cur_cycle_bank_read_time;
@@ -1961,6 +1963,7 @@ void register_file_cache_t::init_rfc_slots(unsigned slot_idx) {
   m_rfc_slots[slot_idx].reg_idx = 0;
   m_rfc_slots[slot_idx].data_valid = false;
   m_rfc_slots[slot_idx].is_reuse = false;
+  m_rfc_slots[slot_idx].is_compiler_reuse = false;
   m_rfc_slots[slot_idx].is_this_slot_enabled = false;
 }
 
@@ -2035,6 +2038,12 @@ void register_file_cache_t::compute_inst_src_operands_cycle(warp_inst_t *inst) {
           operand_fetch_remaining_cycles[bank_id]++;
           accessed_registers.insert(inst->arch_reg.src[i]);
       }
+      else {
+        inst->m_reuse_time += 1;
+        this_rfc_reuse_time += 1;
+        if (m_rfc_slots[i].is_compiler_reuse) this_rfc_compiler_reuse_hit_time += 1;
+        m_rfc_slots[i].is_compiler_reuse = false; // after hitting the compiler reuse, set it to be false to avoid counting the reuse time multiple times
+      }
     }
   }
 
@@ -2085,6 +2094,15 @@ void register_file_cache_t::set_reuse(warp_inst_t *inst) {
   for (int i = 0; i < m_rfc_slots.size(); i++){
     if (reuse_mask & (1 << i) or !m_is_compiler_ctrl_reuse){
       m_rfc_slots[i].is_reuse = true;
+      if (reuse_mask & (1 << i)) {
+        this_rfc_compiler_reuse_time += 1;
+        m_rfc_slots[i].is_compiler_reuse = true;
+      }
+      else m_rfc_slots[i].is_compiler_reuse = false;
+    }
+    else {
+      m_rfc_slots[i].is_reuse = false;
+      m_rfc_slots[i].is_compiler_reuse = false;
     }
   }
 }
@@ -5577,6 +5595,24 @@ void simt_core_cluster::print_cache_stats(FILE *fp, unsigned &dl1_accesses,
   for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; ++i) {
     m_core[i]->print_cache_stats(fp, dl1_accesses, dl1_misses);
   }
+}
+
+std::vector<unsigned> simt_core_cluster::get_rfc_compiler_reuse_status() const {
+  unsigned reuse_time = 0;
+  unsigned compiler_reuse_time = 0;
+  unsigned compiler_reuse_hit_time = 0;
+
+  unsigned rfc_num = m_config->gpgpu_num_sched_per_core * m_config->gpgpu_rfc_or_oc_per_scheduler_num;
+
+  for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; i++){
+    shader_core_ctx *core = m_core[i];
+    for (unsigned j = 0; j < rfc_num; j++){
+      reuse_time += core->get_operand_fetch()->get_rfc_cache(j)->this_rfc_reuse_time;
+      compiler_reuse_time += core->get_operand_fetch()->get_rfc_cache(j)->this_rfc_compiler_reuse_time;
+      compiler_reuse_hit_time += core->get_operand_fetch()->get_rfc_cache(j)->this_rfc_compiler_reuse_hit_time;
+    }
+  }
+  return {reuse_time, compiler_reuse_time, compiler_reuse_hit_time};
 }
 
 void simt_core_cluster::get_icnt_stats(long &n_simt_to_mem,

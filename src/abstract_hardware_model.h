@@ -1118,6 +1118,8 @@ class warp_inst_t : public inst_t {
     m_cur_stage_cycles = 0;
     m_issue_to_operand_collector_cycles = 0;
     m_writeback_cycles = 0;
+
+    m_reuse_time = 0;
   }
   warp_inst_t(const core_config *config) {
     m_uid = 0;
@@ -1149,6 +1151,8 @@ class warp_inst_t : public inst_t {
     m_cur_stage_cycles = 0;
     m_issue_to_operand_collector_cycles = 0;
     m_writeback_cycles = 0;
+
+    m_reuse_time = 0;
   }
   virtual ~warp_inst_t() {}
 
@@ -1205,6 +1209,7 @@ class warp_inst_t : public inst_t {
   unsigned long long m_cur_stage_cycles;
   unsigned long long m_issue_to_operand_collector_cycles;
   unsigned long long m_writeback_cycles;
+  unsigned int m_reuse_time;
   std::vector<unsigned long long> m_stall_cycles;
   std::vector<unsigned long long> m_remaining_cycles;
   std::vector<unsigned long long> m_oc_stall_cycles;  // operand collector stall cycles for different reasons
@@ -1239,6 +1244,7 @@ class warp_inst_t : public inst_t {
               warp_inst_oc_stall_type_name[s],
               m_oc_stall_cycles[s]);
     }
+    fprintf(stage_log, "    reuse time: %4u\n", m_reuse_time);
 
     if (stage_log != stdout && stage_log != stderr) {
       fflush(stage_log);
@@ -1258,6 +1264,8 @@ class warp_inst_t : public inst_t {
     fill(m_stall_cycles.begin(), m_stall_cycles.end(), 0);
     fill(m_remaining_cycles.begin(), m_remaining_cycles.end(), 0);
     fill(m_oc_stall_cycles.begin(), m_oc_stall_cycles.end(), 0);
+
+    m_reuse_time = 0;
   }
 
   void issue(const active_mask_t &mask, unsigned warp_id,

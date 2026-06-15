@@ -1481,6 +1481,22 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
   printf("gpu_occupancy = %.4f%% \n", gpu_occupancy.get_occ_fraction() * 100);
   printf("gpu_tot_occupancy = %.4f%% \n",
          (gpu_occupancy + gpu_tot_occupancy).get_occ_fraction() * 100);
+  
+  unsigned reuse_time = 0;
+  unsigned rfc_compiler_reuse_time = 0;
+  unsigned rfc_compiler_reuse_hit_time = 0;
+  for (unsigned i = 0; i < m_config.num_cluster(); i++) {
+    std::vector<unsigned> rfc_stats = m_cluster[i]->get_rfc_compiler_reuse_status();
+    reuse_time += rfc_stats[0];
+    rfc_compiler_reuse_time += rfc_stats[1];
+    rfc_compiler_reuse_hit_time += rfc_stats[2];
+  }
+  printf("reuse_time = %u\n", reuse_time);
+  printf("rfc_compiler_reuse_time = %u\n", rfc_compiler_reuse_time);
+  printf("rfc_compiler_reuse_hit_time = %u\n", rfc_compiler_reuse_hit_time);
+  printf("reuse_time_rate = %12.4f\n", reuse_time > 0 ? (float)reuse_time / rfc_compiler_reuse_time : 0.0);
+  printf("rfc_compiler_reuse_rate = %12.4f\n",
+         rfc_compiler_reuse_time > 0 ? (float)rfc_compiler_reuse_hit_time / rfc_compiler_reuse_time : 0.0);
 
   fprintf(statfout, "max_total_param_size = %llu\n",
           gpgpu_ctx->device_runtime->g_max_total_param_size);
